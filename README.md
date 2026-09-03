@@ -1,0 +1,184 @@
+# Grandia Modloader
+
+Standalone **.NET mod SDK** for Grandia HD Remaster.
+
+Mods are C# class libraries that reference `Grandia.Sdk.dll`. A `[Mod]` entry class has an `[Init]` method that registers hook / service classes. Hook methods can have any name; the host finds them by attributes (`[OnTick]`, `[OnBattleLoad]`, …). Launch injects `GrandiaMod.dll`, which hosts `Grandia.Runtime` (x86 .NET 8). When the game `fopen`s a `.MDP` / `.SCN` / `.OFS`, the runtime builds a `Map`, runs every enabled mod, and assembles blobs through `field_tools.exe`. Custom scripts and hooks are not written over the live SCN/sec[7] copies. The VM lookup at `+0x6F0B0` (`OnScriptExecute`) and `call_hook` at `+0x53560` (`OnCallHook`) redirect those ids to the assembled buffers. Dest-arrival still opens stock files.
+
+## Build
+
+Needs Visual Studio 2022 (Desktop C++ + .NET 8 x86), CMake, Win32, and Python 3 with PyInstaller (build-time only).
+
+```powershell
+cd C:\Users\User\Projects\GrandiaFieldPatch
+
+python tools\pack_field_tools.py
+python tools\build_field_tools.py
+
+cmake -S . -B build -A Win32
+cmake --build build --config Release
+
+dotnet build modloader\GrandiaModloader.csproj -c Release
+```
+
+`GrandiaMod.dll`, `Grandia.Runtime.dll`, `Grandia.Sdk.dll`, and `field_tools\` are copied next to `modloader\bin\Release\net8.0-windows\GrandiaModloader.exe`.
+
+The Visual Studio solution is `GrandiaFieldPatch.sln`. The WinForms app and installer live under `modloader\` (solution folder **modloader**). Right-click **Setup** → Build to produce `GrandiaModloaderSetup.msi` (needs the WiX toolset NuGet restore; .NET 8 Desktop x86 on the target PC).
+
+Ship that folder as the install:
+
+```
+GrandiaModloader.exe
+GrandiaMod.dll
+field_tools\field_tools.exe
+mods\
+```
+
+## Write a mod
+
+1. New C# class library: `net8.0`, `PlatformTarget` **x86**.
+2. Add a reference to `Grandia.Sdk.dll` (from `dist\` or `sdk\bin\Release\net8.0\`). Do not add the SDK project to your mod solution.
+3. One public `[Mod]` class with an `[Init]` method. Register hook classes and any services from there. Name, version, and description on `[Mod]` are what the modloader list shows.
+4. Build and copy **only the DLL** into `GrandiaFieldPatch\mods\` (or use **Add mod**). Maps, scripts, and PNGs are embedded in that DLL.
+
+```xml
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <PlatformTarget>x86</PlatformTarget>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <Import Project="..\..\sdk\Grandia.Mod.targets" />
+  <ItemGroup>
+    <Reference Include="Grandia.Sdk">
+      <HintPath>..\..\dist\Grandia.Sdk.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+</Project>
+```
+
+```csharp
+using Grandia.Sdk;
+
+[Mod("My mod", "1.0.0", Description = "What this mod does.")]
+public sealed class Plugin
+{
+    [Init]
+    public void Init(ModContext ctx)
+    {
+        ctx.Register<HubHooks>();
+    }
+}
+
+sealed class HubHooks
+{
+    [OnMapLoad]
+    public void PatchHubEnter(MapLoadEvent e)
+    {
+        if (e.To.Value != 0xCC15) return;
+        var enter = e.Map.GetScript(0x3000);
+        enter.Clear();
+        enter.CameraOverlay(0x01);
+        enter.Wait(1);
+        enter.CameraDeactivateOverlay(0x01);
+        enter.Yield();
+    }
+
+    [OnScriptExecute]
+    public void ReplaceArmedScript(ScriptExecuteEvent e)
+    {
+        if (e.Map.Value != 0xE010 || e.ScriptId != 0x3000) return;
+        e.Replace("""
+            camera overlay 0x01
+            wait 1
+            camera deactivate_overlay 0x01
+            yield
+            """);
+    }
+}
+```
+
+`[Init]` is `void Name()` or `void Name(ModContext ctx)`. Hook methods are `void Name(TheEvent e)` — the attribute picks the event, not the method name. `Game.Log.Info("...")` / `Game.Log.Warn("...")` append to `GrandiaMod.log`; `ctx.Log("...")` does the same from Init.
+
+Hook attributes: `[OnMapLoad]`, `[OnScriptExecute]`, `[OnCallHook]`, `[OnEventFlag]`, `[OnItemAssignUi]`, `[OnFieldGoldAdd]`, `[OnWorldMapLoad]`, `[OnWorldMapConfirm]`, `[OnMapTravel]`, `[OnSave]`, `[OnLoad]`, `[OnBattleSetup]`, `[OnBattleLoad]`, `[OnMenuOpen]`, `[OnEnemyLoaded]`, `[OnShopOpen]`, `[OnTick]`, `[OnTitleScreen]`, `[OnCharacter]`, `[OnItem]`, `[OnMagic]`.
+
+`[OnCharacter]` fires for ids 1–8 after a slot load copies into MapObj, and once on new game — mutate stats and `e.Learn(Skill.Burn)`. `[OnItem]` / `[OnMagic]` run on every status, shop, and stash WINDT load (the game recopies vanilla tables each time). Item `Cost` is buy gold; `SellPrice` defaults to Cost/2. `[OnMagic]` is WINDT sec7/sec8 (learn requirements, who can learn, power, MP/SP `Cost`, IP) plus STAT/BBG copies in battle. Magic `Cost` is the MP or SP number in menus; `IpCost` is the IP gauge.
+
+### Assets (PNG, …)
+
+Put files under `assets/` (imported `Grandia.Mod.targets` embeds them). World-map plates take the resource file name:
+
+```csharp
+e.Add(new MapId(0xCC15), picturePath: "hub.png", pictureWidth: 30, pictureHeight: 15);
+```
+
+The host extracts the embedded PNG to a temp file for the HD overlay.
+
+### Custom maps (no game-folder copy)
+
+Put compiled `STEM.mdp` / `STEM.scn` / `STEM.ofs` under `maps/` and embed them in the DLL. Register in `[Init]`. The host serves those bytes at fopen.
+
+```xml
+<ItemGroup>
+  <EmbeddedResource Include="maps\**\*" />
+</ItemGroup>
+```
+
+```csharp
+[Init]
+public void Init(ModContext ctx)
+{
+    ctx.Maps.AddFromEmbedded(typeof(Plugin).Assembly, "CC15");
+    // or: ctx.Maps.Add("CC15", mdp, scn, ofs);
+}
+```
+
+Assemble MDP/SCN/OFS when you **build the mod**, then embed the bins. Do not rewrite dest-cam / sec[32] from `OnMapLoad`. Later mods that `Add` the same stem replace earlier ones.
+
+### Custom scripts (assemble at build)
+
+Author `scripts/hub_save.asm` (field assembler text). Import `sdk/Grandia.Mod.targets` so `dotnet build` runs `field_tools embed` and embeds `hub_save.bin`. Register the catalog in `[Init]`. Nothing is replaced until you call `e.Use("hub_save")` from `[OnScriptExecute]` — the same blob can cover several script ids.
+
+```xml
+<Import Project="$(GrandiaFieldPatch)\sdk\Grandia.Mod.targets" />
+```
+
+```
+MyMod/scripts/hub_save.asm
+```
+
+```csharp
+[Init]
+public void Init(ModContext ctx)
+{
+    ctx.Scripts.AddFromEmbedded(typeof(Plugin).Assembly);
+    // or: ctx.Scripts.AddFromEmbedded(asm, "hub_save");
+}
+
+[OnScriptExecute]
+public void UseCompiled(ScriptExecuteEvent e)
+{
+    if (e.Map.Value == 0xE010 && (e.ScriptId == 0xE000 || e.ScriptId == 0x3001))
+        e.Use("hub_save");
+}
+```
+
+`e.Replace(...)` still assembles live. Last `Add` for the same name wins. A pre-built `scripts/hub_save.bin` embeds as-is.
+
+Assemblies with no `[Mod]` still load exported `IMod` types.
+
+The example mod is a separate project: `C:\Users\User\Projects\HubBgmMod` (open `HubBgmMod.sln`, reference `Grandia.Sdk.dll`). `dotnet build` copies `HubBgmMod.dll` into `GrandiaFieldPatch\mods\`. Script ops are the existing field assembler mnemonics — not a new language. Do not rewrite dest-cam / sec[32] from `OnMapLoad`.
+
+## Use
+
+1. Build your mod (`dotnet build -c Release -p:PlatformTarget=x86`) and drop the `.dll` in `mods\`, or **Add mod** and pick it. The list reads name / version / description from `[Mod]` on the DLL.
+2. Check the ones you want. List order is hook order.
+3. Settings: Grandia install folder, Steam or `grandia.exe`.
+4. **Launch Grandia**. Writes `mods.json` next to GrandiaMod.dll (path to `field_tools.exe`), starts the game, injects. Does not compile mods.
+
+If the game is already running, Launch still writes `mods.json` and injects. Quit and Launch again to load a rebuilt `GrandiaMod.dll`. Re-enter a map so fopen assembles; talking to an NPC / `call_hook` is when the redirect runs.
+
+Log next to `grandia.exe`: `GrandiaMod.log` (truncated on each inject). Mods write with `Game.Log.Info("...")` / `Game.Log.Warn("...")`, or `ctx.Log("...")` from `[Init]`. Start skips MP4 cinematics (the vanilla skip path, ungated).
+
+Enable flags and order are in `%AppData%\GrandiaModloader\config.json` (or `config.json` beside the exe).
