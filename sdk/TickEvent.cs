@@ -1,0 +1,25 @@
+namespace Grandia.Sdk;
+
+/// <summary>
+/// About 60 Hz. Poll <see cref="Pad"/> / <see cref="Game.Input"/> and call
+/// <see cref="Game.Turbo"/> / <see cref="Game.Encounters"/> / <see cref="Game.Debug"/>.
+/// Set <see cref="BlockGameInput"/> (or <see cref="Consume"/>) so this pad
+/// update is not applied to field / menus — use while an overlay panel is open.
+/// </summary>
+public sealed class TickEvent
+{
+    public TickEvent(PadState pad)
+    {
+        Pad = pad;
+    }
+
+    public PadState Pad { get; }
+
+    /// <summary>
+    /// Clear the game's pad object after this tick (held/trig at
+    /// <c>+0x319440</c>). <see cref="Pad"/> is still the real XInput state.
+    /// </summary>
+    public bool BlockGameInput { get; set; }
+
+    public void Consume() => BlockGameInput = true;
+}

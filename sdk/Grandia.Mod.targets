@@ -1,0 +1,41 @@
+<Project>
+  <!-- Assemble scripts/*.asm, embed maps/scripts bins, and embed assets/** (PNGs, …). -->
+  <PropertyGroup>
+    <GrandiaFieldPatch Condition="'$(GrandiaFieldPatch)' == '' and Exists('$(MSBuildThisFileDirectory)..\CMakeLists.txt')">$(MSBuildThisFileDirectory)..</GrandiaFieldPatch>
+    <GrandiaFieldPatch Condition="'$(GrandiaFieldPatch)' == ''">$(MSBuildThisFileDirectory)</GrandiaFieldPatch>
+    <FieldToolsExe Condition="'$(FieldToolsExe)' == '' and Exists('$(MSBuildThisFileDirectory)field_tools\field_tools.exe')">$(MSBuildThisFileDirectory)field_tools\field_tools.exe</FieldToolsExe>
+    <FieldToolsExe Condition="'$(FieldToolsExe)' == '' and Exists('$(GrandiaFieldPatch)\vendor\field_tools\field_tools.exe')">$(GrandiaFieldPatch)\vendor\field_tools\field_tools.exe</FieldToolsExe>
+    <AssembleModScripts Condition="'$(AssembleModScripts)' == ''">true</AssembleModScripts>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ScriptAsm Include="scripts\**\*.asm" />
+    <None Include="scripts\**\*.asm" />
+    <None Remove="scripts\**\*.bin" />
+    <EmbeddedResource Include="scripts\**\*.bin">
+      <LogicalName>scripts/%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="assets\**\*">
+      <LogicalName>assets/%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
+  <Target Name="AssembleEmbeddedScripts"
+          BeforeTargets="PrepareResourceNames;BeforeCompile"
+          Condition="'$(AssembleModScripts)' == 'true' and '@(ScriptAsm)' != ''">
+    <PropertyGroup>
+      <_ModScriptBinDir>$(MSBuildProjectDirectory)\scripts</_ModScriptBinDir>
+    </PropertyGroup>
+    <Error Condition="!Exists('$(FieldToolsExe)')"
+           Text="field_tools.exe not found. Run python tools\build_field_tools.py in GrandiaFieldPatch." />
+    <Message Importance="high" Text="Assembling @(ScriptAsm->Count()) field script(s) into $(_ModScriptBinDir)" />
+    <MakeDir Directories="$(_ModScriptBinDir)" />
+    <Exec Command="&quot;$(FieldToolsExe)&quot; embed --in &quot;$(MSBuildProjectDirectory)\scripts&quot; --out &quot;$(_ModScriptBinDir)&quot;"
+          WorkingDirectory="$(MSBuildProjectDirectory)" />
+    <ItemGroup>
+      <EmbeddedResource Include="$(_ModScriptBinDir)\*.bin">
+        <LogicalName>scripts/%(Filename)%(Extension)</LogicalName>
+      </EmbeddedResource>
+    </ItemGroup>
+  </Target>
+</Project>

@@ -1,0 +1,36 @@
+<Project Sdk="WixToolset.Sdk/5.0.2">
+  <PropertyGroup>
+    <OutputType>Package</OutputType>
+    <InstallerPlatform>x86</InstallerPlatform>
+    <OutputName>GrandiaModloaderSetup</OutputName>
+    <Configuration Condition="'$(Configuration)' == ''">Release</Configuration>
+    <AppOutDir>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\bin\$(Configuration)\net8.0-windows\'))</AppOutDir>
+    <RepoRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\..\'))</RepoRoot>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\GrandiaModloader.csproj" />
+    <BindPath Include="$(AppOutDir)" BindName="app" />
+  </ItemGroup>
+
+  <Target Name="StageNativePayload" BeforeTargets="BeforeBuild">
+    <MakeDir Directories="$(AppOutDir)" />
+    <ItemGroup>
+      <_StageFile Include="$(RepoRoot)dist\GrandiaMod.dll" Condition="Exists('$(RepoRoot)dist\GrandiaMod.dll')" />
+      <_StageFile Include="$(RepoRoot)build\Release\GrandiaMod.dll" Condition="Exists('$(RepoRoot)build\Release\GrandiaMod.dll')" />
+      <_StageFile Include="$(RepoRoot)dist\Grandia.Runtime.dll" Condition="Exists('$(RepoRoot)dist\Grandia.Runtime.dll')" />
+      <_StageFile Include="$(RepoRoot)dist\Grandia.Runtime.runtimeconfig.json" Condition="Exists('$(RepoRoot)dist\Grandia.Runtime.runtimeconfig.json')" />
+      <_StageFile Include="$(RepoRoot)dist\Grandia.Runtime.deps.json" Condition="Exists('$(RepoRoot)dist\Grandia.Runtime.deps.json')" />
+      <_StageFile Include="$(RepoRoot)dist\Grandia.Sdk.dll" Condition="Exists('$(RepoRoot)dist\Grandia.Sdk.dll')" />
+      <_StageFile Include="$(RepoRoot)runtime\bin\$(Configuration)\net8.0\Grandia.Runtime.dll" Condition="Exists('$(RepoRoot)runtime\bin\$(Configuration)\net8.0\Grandia.Runtime.dll')" />
+      <_StageFile Include="$(RepoRoot)runtime\bin\$(Configuration)\net8.0\Grandia.Runtime.runtimeconfig.json" Condition="Exists('$(RepoRoot)runtime\bin\$(Configuration)\net8.0\Grandia.Runtime.runtimeconfig.json')" />
+      <_StageFile Include="$(RepoRoot)runtime\bin\$(Configuration)\net8.0\Grandia.Runtime.deps.json" Condition="Exists('$(RepoRoot)runtime\bin\$(Configuration)\net8.0\Grandia.Runtime.deps.json')" />
+      <_StageFile Include="$(RepoRoot)runtime\bin\$(Configuration)\net8.0\Grandia.Sdk.dll" Condition="Exists('$(RepoRoot)runtime\bin\$(Configuration)\net8.0\Grandia.Sdk.dll')" />
+      <_StageFile Include="$(RepoRoot)sdk\bin\$(Configuration)\net8.0\Grandia.Sdk.dll" Condition="Exists('$(RepoRoot)sdk\bin\$(Configuration)\net8.0\Grandia.Sdk.dll')" />
+      <_StageFile Include="$(RepoRoot)sdk\Grandia.Mod.targets" Condition="Exists('$(RepoRoot)sdk\Grandia.Mod.targets')" />
+      <_StageFile Include="$(RepoRoot)data\pdat_charpack.bin" Condition="Exists('$(RepoRoot)data\pdat_charpack.bin')" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_StageFile)" DestinationFolder="$(AppOutDir)" SkipUnchangedFiles="true"
+          Condition="'@(_StageFile)' != ''" />
+  </Target>
+</Project>

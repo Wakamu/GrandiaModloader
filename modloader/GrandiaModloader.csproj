@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PlatformTarget>x86</PlatformTarget>
+    <AssemblyName>GrandiaModloader</AssemblyName>
+    <RootNamespace>GrandiaModloader</RootNamespace>
+    <ApplicationHighDpiMode>SystemAware</ApplicationHighDpiMode>
+    <ApplicationIcon>app.ico</ApplicationIcon>
+    <_FieldToolsSrc>$(MSBuildThisFileDirectory)..\vendor\field_tools</_FieldToolsSrc>
+  </PropertyGroup>
+
+  <Target Name="CopyFieldTools" AfterTargets="Build"
+          Condition="Exists('$(_FieldToolsSrc)\field_tools.exe')">
+    <MakeDir Directories="$(OutputPath)field_tools" />
+    <ItemGroup>
+      <_FieldToolsFile Include="$(_FieldToolsSrc)\**\*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_FieldToolsFile)"
+          DestinationFiles="@(_FieldToolsFile->'$(OutputPath)field_tools\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+</Project>

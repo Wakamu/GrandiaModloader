@@ -1,0 +1,3 @@
+# One folder per compiled mod (mod.json + DLL).
+# HubBgm lives at C:\Users\User\Projects\HubBgmMod; list it here via HubBgm\mod.json.
+# Enable/order is stored in the modloader config, not in this folder.

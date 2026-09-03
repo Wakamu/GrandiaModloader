@@ -1,0 +1,44 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+      Name="Grandia Modloader"
+      Manufacturer="Grandia Modloader"
+      Version="1.0.0"
+      UpgradeCode="42089B4C-70B8-4C28-9451-F064873E11F7"
+      Language="1033"
+      Scope="perMachine">
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Grandia Modloader is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+    <Icon Id="AppIcon" SourceFile="..\app.ico" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+
+    <StandardDirectory Id="ProgramFilesFolder">
+      <Directory Id="INSTALLFOLDER" Name="Grandia Modloader">
+        <Directory Id="ModsFolder" Name="mods" />
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="AppMenuFolder" Name="Grandia Modloader" />
+    </StandardDirectory>
+
+    <Feature Id="ProductFeature" Title="Grandia Modloader" Level="1">
+      <Files Directory="INSTALLFOLDER" Include="!(bindpath.app)\**">
+        <Exclude Files="!(bindpath.app)\**\*.pdb" />
+        <Exclude Files="!(bindpath.app)\**\*.xml" />
+      </Files>
+      <Component Id="ModsFolderComponent" Directory="ModsFolder" Guid="CCD8EF6E-06E2-4A56-89C1-426B3F5D71EE">
+        <CreateFolder />
+        <RegistryValue Root="HKLM" Key="Software\GrandiaModloader" Name="ModsFolder" Type="string" Value="[ModsFolder]" KeyPath="yes" />
+      </Component>
+      <Component Id="StartMenuShortcut" Directory="AppMenuFolder" Guid="DD4754D3-4BA4-4E92-97DB-61BB888A8911">
+        <Shortcut Name="Grandia Modloader"
+                  Description="Launch Grandia with mods"
+                  Target="[INSTALLFOLDER]GrandiaModloader.exe"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Icon="AppIcon" />
+        <RemoveFolder Id="RemoveAppMenuFolder" On="uninstall" />
+        <RegistryValue Root="HKCU" Key="Software\GrandiaModloader" Name="StartMenu" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </Feature>
+  </Package>
+</Wix>
