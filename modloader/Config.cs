@@ -112,14 +112,31 @@ public static class Paths
         }
     }
 
-    public static string ModsDir => Path.Combine(DataRoot, "mods");
+    public static string ModsDir => Path.Combine(UserDataRoot, "mods");
 
-    public static string OverlayDir => Path.Combine(DataRoot, "overlay");
+    public static string OverlayDir => Path.Combine(UserDataRoot, "overlay");
 
     /// <summary>
-    /// Source tree when developing; the folder next to the exe when installed.
+    /// Writable per-user data folder.
+    /// Dev builds: repo root (next to CMakeLists.txt).
+    /// Installed builds: %AppData%\GrandiaModloader.
     /// </summary>
-    public static string DataRoot => IsSourceTree ? RepoRoot : AppDir;
+    public static string UserDataRoot
+    {
+        get
+        {
+            if (IsSourceTree)
+            {
+                return RepoRoot;
+            }
+
+            var appData = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                "GrandiaModloader");
+            Directory.CreateDirectory(appData);
+            return appData;
+        }
+    }
 
     public static bool IsSourceTree =>
         File.Exists(Path.Combine(RepoRoot, "CMakeLists.txt")) &&

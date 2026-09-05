@@ -256,7 +256,6 @@ void EvaluateConfirmLoadAtOp3() {
     if (!RaiseOnLoad(0, trailer, trailer_len)) {
         g_load_denied = true;
         g_confirm_load_armed = false;
-        LogInfo("OnLoad ConfirmPeek slot=%d deny trailer=%d", GetSelectedSlot(), trailer_len);
         return;
     }
 
@@ -268,7 +267,6 @@ void EvaluateConfirmLoadAtOp3() {
     g_confirm_load_armed = true;
     g_peek_ok = true;
     g_load_denied = false;
-    LogInfo("OnLoad ConfirmPeek slot=%d allow trailer=%d", GetSelectedSlot(), trailer_len);
 }
 
 void AppendTrailer(std::FILE* file) {
@@ -307,8 +305,6 @@ void AppendTrailer(std::FILE* file) {
         }
         std::memcpy(g_committed, req.trailer, static_cast<std::size_t>(len));
         g_committed_len = len;
-        LogInfo("OnSave slot=%d trailer=%d (+%u after 0xE80)", req.slot, len,
-                static_cast<unsigned>(sizeof(env) + static_cast<unsigned>(len)));
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         LogWarn("OnSave trailer fwrite faulted");
     }
@@ -326,7 +322,6 @@ void CommitApplied() {
         std::memset(g_committed, 0, sizeof(g_committed));
         g_committed_len = 0;
     }
-    LogInfo("OnLoad Applied slot=%d trailer=%d", GetSelectedSlot(), g_committed_len);
     ClearPending();
 }
 

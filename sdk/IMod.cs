@@ -13,8 +13,11 @@ public interface IMod
     /// Game is <c>fopen</c>ing an MDP/SCN/OFS (assemble signal). Mutate
     /// <see cref="MapLoadEvent.Map"/>; do not return a new map. Assembled
     /// scripts and hooks are delivered by redirecting <see cref="OnScriptExecute"/>
-    /// / <see cref="OnCallHook"/> — the host does not remap fopen. Do not
-    /// rewrite dest-cam / sec[32].
+    /// / <see cref="OnCallHook"/> — the host does not remap fopen. Scripts,
+    /// hooks, and zones assemble in-process (no <c>field_tools</c>). Do not
+    /// rewrite dest-cam / sec[32]. <see cref="Map.Encounters"/> lists this
+    /// map's scripted fights (handler 0x19 / <c>scripted_battle</c>) and
+    /// field wanderers (sec[30] + sec[8] kind 2).
     /// </summary>
     void OnMapLoad(MapLoadEvent e);
 
@@ -22,8 +25,11 @@ public interface IMod
     /// Script id → IP at <c>+0x6F0B0</c> (once per arm, not per opcode).
     /// Call <see cref="ScriptExecuteEvent.Replace"/> or mutate
     /// <see cref="ScriptExecuteEvent.Script"/> to stop vanilla and run a
-    /// new assembler script. Prefills <see cref="ScriptExecuteEvent.Bytecode"/>
-    /// from OnMapLoad. <see cref="ScriptExecuteEvent.Skip"/> drops the script.
+    /// new assembler script. <see cref="Script.Lines"/> decodes on first
+    /// read; assemble is in-process C# only after a write, and applies to
+    /// this arm only. Prefills <see cref="ScriptExecuteEvent.Bytecode"/>
+    /// from OnMapLoad (those stay until the map is assembled again).
+    /// <see cref="ScriptExecuteEvent.Skip"/> drops the script.
     /// </summary>
     void OnScriptExecute(ScriptExecuteEvent e)
     {
@@ -35,6 +41,7 @@ public interface IMod
     /// Call <see cref="CallHookEvent.Replace"/> with a table-2 assembler line
     /// (e.g. <c>hook 888 setup dest=0xCC15 spawn=1</c>), set a 20-byte
     /// <see cref="CallHookEvent.Row"/>, or <see cref="CallHookEvent.Skip"/> to drop.
+    /// Assemble is in-process C# (no <c>field_tools</c>).
     /// </summary>
     void OnCallHook(CallHookEvent e)
     {
@@ -66,9 +73,10 @@ public interface IMod
 
     /// <summary>
     /// Area map open at +0x59320. <see cref="WorldMapLoadEvent.Destinations"/>
-    /// is the icons on this set (up to 16). One icon can travel to more than
+    /// is the icons on this set (up to 32). One icon can travel to more than
     /// one map (Lama North vs South) from <see cref="WorldMapLoadEvent.OriginContext"/>.
     /// Add / remove / set <see cref="WorldMapDestination.Revealed"/>,
+    /// <see cref="WorldMapDestination.Accessible"/> (grey + no cursor when false),
     /// <see cref="WorldMapDestination.Picture"/> (stock icon art to reuse),
     /// or <see cref="WorldMapDestination.SetPicture"/> (PNG as its own
     /// HD nameplate; optional width/height in area-map screen units).
@@ -90,12 +98,15 @@ public interface IMod
     }
 
     /// <summary>
-    /// Field door / setup warp (before the auto-walk) or world-map confirm
-    /// dest commit. <see cref="MapTravelEvent.From"/> is the current map;
-    /// <see cref="MapTravelEvent.Destination"/> and
-    /// <see cref="MapTravelEvent.Spawn"/> are writable.
-    /// Set <see cref="MapTravelEvent.Allow"/> to false to stay on this map
-    /// without locking the party walk. Cancel world-map travel with
+    /// Field door / setup warp (before the auto-walk), field world-map
+    /// exit (<see cref="MapTravelKind.WorldMapOpen"/>), or world-map
+    /// confirm dest commit. <see cref="MapTravelEvent.From"/> is the
+    /// current map; <see cref="MapTravelEvent.Destination"/> and
+    /// <see cref="MapTravelEvent.Spawn"/> are writable. On
+    /// <see cref="MapTravelKind.WorldMapOpen"/> dest starts at 0 (open
+    /// the area map); set a map id to skip the AMAP and dest-load that
+    /// field. Set <see cref="MapTravelEvent.Allow"/> to false to stay on
+    /// this map without locking the party walk. Cancel a pin confirm with
     /// <see cref="OnWorldMapConfirm"/> instead.
     /// </summary>
     void OnMapTravel(MapTravelEvent e)
@@ -183,7 +194,8 @@ public interface IMod
     /// About 60 Hz. Poll <see cref="TickEvent.Pad"/> / <see cref="Game.Input"/>
     /// and drive <see cref="Game.Turbo"/>, <see cref="Game.Encounters"/>, and
     /// <see cref="Game.Debug"/>. Set <see cref="TickEvent.BlockGameInput"/> to
-    /// swallow this pad update so the game does not walk / open pause.
+    /// swallow this pad update so the game does not walk, open pause,
+    /// or move the title New Game / Continue / Options cursor.
     /// </summary>
     void OnTick(TickEvent e)
     {
@@ -210,7 +222,8 @@ public interface IMod
     /// <summary>
     /// WINDT sec3 item record after each status / shop / stash load
     /// publishes sec3 (before the shop bakes prices). Cost / SellPrice /
-    /// icon / paras write every live sec3 alias. Re-apply on every open —
+    /// icon / paras write every live sec3 alias. <see cref="ItemEvent.Effect"/>
+    /// is the skill id used in combat (Herbs → Heal). Re-apply on every open —
     /// the game recopies vanilla WINDT each time. SellPrice defaults to
     /// Cost/2 (vanilla shop rule).
     /// </summary>
@@ -221,10 +234,24 @@ public interface IMod
     /// <summary>
     /// Party skill catalog (WINDT sec7/sec8 on field menus; STAT/BBG in
     /// battle). Magic and weapon moves. Mutate Power, Cost (MP/SP), IpCost
-    /// (IP gauge), Requirements, CharacterMask / Allow. Re-applied on every
-    /// menu WINDT load. Grant already-learned bits on <see cref="OnCharacter"/>.
+    /// (IP gauge), Requirements, CharacterMask / Allow, Effect / Mode
+    /// (<see cref="HealMode"/>, <see cref="StatusAilment"/>, …).
+    /// Re-applied on every menu WINDT load. Grant already-learned bits on
+    /// <see cref="OnCharacter"/>.
     /// </summary>
     void OnMagic(MagicEvent e)
+    {
+    }
+
+    /// <summary>
+    /// Field VM is about to display a type-1 / type-8 dialogue op
+    /// (dispatch at <c>+0x6F174</c>). <see cref="DialogueEvent.Markup"/> is
+    /// the editor string (decoded on first read, encoded only if assigned).
+    /// Assign a new value to replace this showing, or set
+    /// <see cref="DialogueEvent.Skip"/> to drop the opcode and continue
+    /// the script. In-process — no <c>field_tools</c>.
+    /// </summary>
+    void OnDialogue(DialogueEvent e)
     {
     }
 }

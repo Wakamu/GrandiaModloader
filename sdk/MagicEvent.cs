@@ -26,8 +26,10 @@ public sealed class MagicEvent
     public string Name { get; }
 
     /// <summary>
-    /// First F/W/U/E learn requirement, or <see cref="MagicElement.None"/>.
-    /// Informational unless you also change <see cref="Requirements"/>.
+    /// First F/W/U/E learn school, or <see cref="MagicElement.None"/>.
+    /// Cure/Poizn are Water here; the battle icon is Forest via
+    /// <see cref="Combat"/>. Informational unless you also change
+    /// <see cref="Requirements"/>.
     /// </summary>
     public MagicElement Element { get; set; }
 
@@ -56,17 +58,94 @@ public sealed class MagicEvent
     /// <summary>Cast time / IP-gauge field (combat row u16 at +4). Not the MP/SP number.</summary>
     public int IpCost { get; set; }
 
-    /// <summary>ATACK-IP / extra combat value (u16 at +6).</summary>
-    public int Area { get; set; }
+    /// <summary>
+    /// IP knockback (combat row u16 at +6). How far the target is pushed
+    /// back on the IP bar. Shockwave is 3000, Lotus Cut / Ice Slash 8500,
+    /// Heal is 0.
+    /// </summary>
+    public int IpKnockback { get; set; }
+
+    /// <summary>Same as <see cref="IpKnockback"/> (old name).</summary>
+    public int Area
+    {
+        get => IpKnockback;
+        set => IpKnockback = value;
+    }
 
     /// <summary>Range-ish byte (STAT sec0 +12).</summary>
     public int Range { get; set; }
 
     /// <summary>
-    /// Combat element bits at STAT sec0 +14:
+    /// Combat element bits at STAT sec0 +14. Prefer <see cref="Combat"/>.
     /// 0x10 fire, 0x20 water, 0x40 wind, 0x80 earth (OR for combos).
+    /// Forest is Water|Earth (<c>0xA0</c>).
     /// </summary>
     public int ElementFlags { get; set; }
+
+    /// <summary>
+    /// Typed <see cref="ElementFlags"/>. Cure / Poizn / Stram are
+    /// <see cref="CombatElement.Forest"/>.
+    /// </summary>
+    public CombatElement Combat
+    {
+        get => (CombatElement)ElementFlags;
+        set => ElementFlags = (int)value;
+    }
+
+    /// <summary>Combat row +18. Heal, damage, status, drain, …</summary>
+    public EffectType Effect { get; set; }
+
+    /// <summary>
+    /// Combat row +19. Meaning depends on <see cref="Effect"/> —
+    /// use <see cref="Heal"/> / <see cref="Damage"/> / <see cref="Status"/> /
+    /// <see cref="Stat"/> / <see cref="Clear"/> instead of raw numbers.
+    /// Party ailment-on-hit is not a percent here — that is
+    /// <see cref="EnemySkill.AddAilment"/> / <see cref="EnemySkill.Chance"/>.
+    /// Crit rate is <see cref="CriticalChance"/>.
+    /// </summary>
+    public int Mode { get; set; }
+
+    /// <summary>
+    /// Critical-hit percent at combat row +17 (0–100). Shockwave is 10,
+    /// Midair Cut is 100. Not <see cref="EnemySkill.Chance"/> (status proc).
+    /// </summary>
+    public int CriticalChance { get; set; }
+
+    public HealMode Heal
+    {
+        get => (HealMode)Mode;
+        set => Mode = (int)value;
+    }
+
+    public DamageKind Damage
+    {
+        get => (DamageKind)Mode;
+        set => Mode = (int)value;
+    }
+
+    public StatusAilment Status
+    {
+        get => (StatusAilment)Mode;
+        set => Mode = (int)value;
+    }
+
+    public StatMod Stat
+    {
+        get => (StatMod)Mode;
+        set => Mode = (int)value;
+    }
+
+    public ClearAilment Clear
+    {
+        get => (ClearAilment)Mode;
+        set => Mode = (int)value;
+    }
+
+    public DeathKind Death
+    {
+        get => (DeathKind)Mode;
+        set => Mode = (int)value;
+    }
 
     public bool Allows(CharacterId id)
     {

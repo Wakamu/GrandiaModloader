@@ -41,6 +41,7 @@ Handler type → callee (RVA), from ``+0x53CF8``:
 | 0x14 | +0x76660 | unit_bind — bind field/party unit into [0x719BC0] |
 | 0x15 | +0x76860 | param_block — write/tween camera parms at [0x7193E0] |
 | 0x18 | +0x76D80 | visibility — party/NPC visible flags (+0x76F20) |
+| 0x19 | +0x77160 | scripted_battle — write encounter blob, latch [0x71CD58]=1 |
 | 0x1A | +0x773A0 | cutscene — fade / talk cast / script word |
 | 0x1B | +0x778F0 | party_state — party / control FSM |
 | 0x1C | +0x78000 | hook_fanout — fire child hook ids |
@@ -94,7 +95,7 @@ HANDLER_TYPE_NAMES: dict[int, str] = {
     0x16: "type_16",
     0x17: "type_17",
     0x18: "visibility",
-    0x19: "type_19",
+    0x19: "scripted_battle",
     0x1A: "cutscene",
     0x1B: "party_state",
     0x1C: "hook_fanout",
@@ -175,6 +176,7 @@ FLAG_WAIT_BANKS = (0, 0x800, 0x900, 0xA00, 0xE00, 0x1600, 0x1E00)
 
 # 0x1C fanout child field offsets in 20-byte rows (+0x78000).
 _FANOUT_CHILD_OFFS = (9, 10, 11, 15, 16, 17, 18, 19)
+_SCRIPTED_BATTLE_PAIR_OFFS = (8, 9, 0xA, 0xB, 0xF, 0x10, 0x11, 0x12)
 
 # party_actor (0x1D) subtype = row[+4] & 0xF (+0x78868 shared table).
 PARTY_ACTOR_SUBTYPES: dict[int, str] = {
@@ -597,6 +599,10 @@ def decode_hook_payload(handler_type: int, raw: bytes, *, row_size: int) -> dict
 
     if handler_type == 0x00:
         # +0x72C00: BE u16 → [0x719930] / [0x63FAA0] via +0x57550.
+        # On table-1 AABB rows the word is usually an SCN id (0x6xxx / 0x9xxx /
+        # 0xDxxx). +0x53830 → +0x53D80 applies the same flag gate as setup
+        # (+2 mode/polarity, packed flags at +0xC/+0xD/+0xE) before arming.
+        flag1, flag2 = setup_gate_flags(raw)
         out.update(
             {
                 "kind": "cam_word",
@@ -606,6 +612,10 @@ def decode_hook_payload(handler_type: int, raw: bytes, *, row_size: int) -> dict
                 "pollTicks": raw[8],
                 "delayTicks": raw[0x10],
                 "followHookId": raw[0x13] or None,
+                "gateMode": raw[2] & 7,
+                "gatePolarity": (raw[2] >> 3) & 1,
+                "gateFlag1": flag1 or None,
+                "gateFlag2": flag2 or None,
             }
         )
         return out
@@ -809,6 +819,28 @@ def decode_hook_payload(handler_type: int, raw: bytes, *, row_size: int) -> dict
                 "holdTicks": raw[0xF],
                 "delayTicks": raw[0x10],
                 "followHookId": raw[0x13] or None,
+            }
+        )
+        return out
+
+    if handler_type == 0x19:
+        # +0x77160 writes the encounter blob then [0x71CD58] = 1.
+        # [5] = EncounterTable (B00x). [6:8] BE optional word.
+        # Pairs at 8,9,A,B,F,10,11,12: high nibble = SpeciesIndex, low = Count.
+        # Encounter[13] is hardcoded 0xFF (not a wanderer row).
+        pairs = []
+        for off in _SCRIPTED_BATTLE_PAIR_OFFS:
+            b = raw[off]
+            if b:
+                pairs.append({"speciesIndex": b >> 4, "count": b & 0xF, "off": off})
+        out.update(
+            {
+                "kind": "scripted_battle",
+                "rowFlags": raw[4],
+                "encounterTable": raw[5],
+                "word": (raw[6] << 8) | raw[7],
+                "pairs": pairs,
+                "trig": raw[2],
             }
         )
         return out
@@ -1066,6 +1098,8 @@ def cam_word_meaning(word: int) -> str:
     """Human label for a type-0 cam_word payload."""
     if 0xE000 <= word <= 0xE0FF:
         return f"Save/Recover/Hint menu (starts SCN 0x{word:04X})"
+    if 0x9000 <= word <= 0x9FFF or 0x6000 <= word <= 0x6FFF:
+        return f"starts SCN 0x{word:04X}"
     if 0xD000 <= word <= 0xD0FF:
         return f"door/talk prompt (starts SCN 0x{word:04X})"
     if 0x7F00 <= word <= 0x7FFF:
@@ -1103,7 +1137,19 @@ def explain_decoded(decoded: dict[str, Any], *, hook_id: int | None = None) -> s
         return f"{hid}latches SoftHD channel {ch}.{extra}{delay_s}{follow_s}"
     if kind == "cam_word":
         word = int(decoded.get("word") or 0)
-        return f"{hid}writes {cam_word_meaning(word)}.{delay_s}{follow_s}"
+        mode = int(decoded.get("gateMode") or 0)
+        f1 = int(decoded.get("gateFlag1") or 0)
+        f2 = int(decoded.get("gateFlag2") or 0)
+        pol = int(decoded.get("gatePolarity") or 0)
+        cond = ""
+        if mode == 1 and f1:
+            cond = f" if flag 0x{f1:X} is {'set' if pol else 'clear'}"
+        elif mode == 5 and f1:
+            if pol:
+                cond = f" if flag 0x{f1:X} is set and 0x{f2:X} is clear"
+            else:
+                cond = f" if flag 0x{f1:X} is clear or 0x{f2:X} is set"
+        return f"{hid}writes {cam_word_meaning(word)}.{cond}{delay_s}{follow_s}"
     if kind == "setup":
         pair0 = int(decoded.get("pair0") or 0)
         mode = int(decoded.get("gateMode") or 0)
@@ -1151,6 +1197,19 @@ def explain_decoded(decoded: dict[str, Any], *, hook_id: int | None = None) -> s
                 f"on flag 0x{fid:04X}.{delay_s}{follow_s}"
             )
         return f"{hid}waits until flag 0x{fid:04X} is {expect}.{delay_s}{follow_s}"
+    if kind == "scripted_battle":
+        table = int(decoded.get("encounterTable") or 0)
+        pairs = decoded.get("pairs") or []
+        pack = " ".join(
+            f"{int(p.get('speciesIndex') or 0)}x{int(p.get('count') or 0)}" for p in pairs
+        )
+        extra = f" {pack}" if pack else ""
+        word = int(decoded.get("word") or 0)
+        word_s = f" word=0x{word:X}" if word else ""
+        return (
+            f"{hid}scripted battle table=0x{table:02X}{extra}{word_s} "
+            f"(EncounterRow=255).{follow_s}"
+        )
     if kind == "chest":
         return (
             f"{hid}chest event 0x{int(decoded.get('eventId') or 0):04X} "
@@ -1863,6 +1922,34 @@ def build_sys_latch_row(
     raw[0x10] = _u8(delay_ticks)
     raw[0x13] = _u8(follow_hook_id)
     return bytes(raw)
+
+
+def build_scripted_battle_row(
+    hook_id: int,
+    table: int,
+    pairs: list[tuple[int, int]] | None = None,
+    *,
+    word: int = 0,
+    row_flags: int | None = None,
+    flags1: int = 0,
+) -> bytes:
+    """20-byte handler 0x19. pairs are (SpeciesIndex, Count) nibbles."""
+    fields: dict[int, int] = {
+        4: _u8(0x40 if row_flags is None else row_flags),
+        5: _u8(table),
+        6: (int(word) >> 8) & 0xFF,
+        7: int(word) & 0xFF,
+    }
+    packed = list(pairs or [])
+    if len(packed) > len(_SCRIPTED_BATTLE_PAIR_OFFS):
+        raise ValueError(
+            f"scripted_battle allows {len(_SCRIPTED_BATTLE_PAIR_OFFS)} pairs, got {len(packed)}"
+        )
+    for i, (idx, cnt) in enumerate(packed):
+        if not 0 <= int(idx) <= 15 or not 0 <= int(cnt) <= 15:
+            raise ValueError("scripted_battle pair index/count must be 0..15")
+        fields[_SCRIPTED_BATTLE_PAIR_OFFS[i]] = ((int(idx) & 0xF) << 4) | (int(cnt) & 0xF)
+    return build_typed_row(hook_id, 0x19, fields, flags1=flags1)
 
 
 def build_typed_row(hook_id: int, handler: int, fields: dict[int, int], *, flags1: int = 0, row_size: int = 20) -> bytes:

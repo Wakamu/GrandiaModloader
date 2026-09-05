@@ -38,7 +38,10 @@ public sealed class CallHookEvent
     /// <summary>Do not dispatch this hook.</summary>
     public bool Skip { get; set; }
 
-    /// <summary>Stop the vanilla hook and run this table-2 assembler line instead.</summary>
+    /// <summary>
+    /// Stop the vanilla hook and run this table-2 assembler line instead.
+    /// Assembled in-process (no <c>field_tools</c>).
+    /// </summary>
     public void Replace(string assembler)
     {
         Assembler = assembler ?? "";

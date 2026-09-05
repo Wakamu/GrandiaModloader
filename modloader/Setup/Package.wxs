@@ -1,13 +1,20 @@
-<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
   <Package
       Name="Grandia Modloader"
       Manufacturer="Grandia Modloader"
-      Version="1.0.0"
+      Version="$(var.MsiVersion)"
       UpgradeCode="42089B4C-70B8-4C28-9451-F064873E11F7"
       Language="1033"
       Scope="perMachine">
-    <MajorUpgrade DowngradeErrorMessage="A newer version of Grandia Modloader is already installed." />
+    <!-- Same-version MSI is Repair and leaves files alone. Stamp a new
+         Version each Setup build (see Setup.wixproj) and allow a same-hour
+         rebuild to replace the previous install. -->
+    <MajorUpgrade
+        AllowSameVersionUpgrades="yes"
+        DowngradeErrorMessage="A newer version of Grandia Modloader is already installed." />
     <MediaTemplate EmbedCab="yes" />
+    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
     <Icon Id="AppIcon" SourceFile="..\app.ico" />
     <Property Id="ARPPRODUCTICON" Value="AppIcon" />
 
@@ -21,14 +28,20 @@
       <Directory Id="AppMenuFolder" Name="Grandia Modloader" />
     </StandardDirectory>
 
+    <StandardDirectory Id="DesktopFolder" />
+
+    <!-- Desktop shortcut checkbox on the finish page -->
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Create a desktop shortcut" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+
     <Feature Id="ProductFeature" Title="Grandia Modloader" Level="1">
       <Files Directory="INSTALLFOLDER" Include="!(bindpath.app)\**">
         <Exclude Files="!(bindpath.app)\**\*.pdb" />
-        <Exclude Files="!(bindpath.app)\**\*.xml" />
       </Files>
       <Component Id="ModsFolderComponent" Directory="ModsFolder" Guid="CCD8EF6E-06E2-4A56-89C1-426B3F5D71EE">
         <CreateFolder />
         <RegistryValue Root="HKLM" Key="Software\GrandiaModloader" Name="ModsFolder" Type="string" Value="[ModsFolder]" KeyPath="yes" />
+        <RegistryValue Root="HKLM" Key="Software\GrandiaModloader" Name="InstallDir" Type="string" Value="[INSTALLFOLDER]" />
       </Component>
       <Component Id="StartMenuShortcut" Directory="AppMenuFolder" Guid="DD4754D3-4BA4-4E92-97DB-61BB888A8911">
         <Shortcut Name="Grandia Modloader"
@@ -38,6 +51,16 @@
                   Icon="AppIcon" />
         <RemoveFolder Id="RemoveAppMenuFolder" On="uninstall" />
         <RegistryValue Root="HKCU" Key="Software\GrandiaModloader" Name="StartMenu" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="DesktopShortcut" Directory="DesktopFolder" Guid="A1B2C3D4-E5F6-7890-ABCD-EF1234567890"
+                 Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1">
+        <Shortcut Name="Grandia Modloader"
+                  Description="Launch Grandia with mods"
+                  Target="[INSTALLFOLDER]GrandiaModloader.exe"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Icon="AppIcon" />
+        <RemoveFolder Id="RemoveDesktopFolder" On="uninstall" />
+        <RegistryValue Root="HKCU" Key="Software\GrandiaModloader" Name="Desktop" Type="integer" Value="1" KeyPath="yes" />
       </Component>
     </Feature>
   </Package>

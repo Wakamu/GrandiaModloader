@@ -31,6 +31,7 @@ public struct HostApiNative
     public nint OverlaySetPanel;
     public nint OverlayClearPanel;
     public nint OverlayPanelActive;
+    public nint PartyWalkGet;
 }
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -112,6 +113,9 @@ internal delegate int OverlayClearPanelFn();
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal delegate int OverlayPanelActiveFn();
 
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate int PartyWalkGetFn(out int x, out int y, out int z);
+
 internal sealed class NativeGame : INativeGame
 {
     private readonly StashAddFn _stashAdd;
@@ -139,6 +143,7 @@ internal sealed class NativeGame : INativeGame
     private readonly OverlaySetPanelFn _overlaySetPanel;
     private readonly OverlayClearPanelFn _overlayClearPanel;
     private readonly OverlayPanelActiveFn _overlayPanelActive;
+    private readonly PartyWalkGetFn _partyWalkGet;
 
     public NativeGame(HostApiNative api)
     {
@@ -167,6 +172,7 @@ internal sealed class NativeGame : INativeGame
         _overlaySetPanel = Marshal.GetDelegateForFunctionPointer<OverlaySetPanelFn>(api.OverlaySetPanel);
         _overlayClearPanel = Marshal.GetDelegateForFunctionPointer<OverlayClearPanelFn>(api.OverlayClearPanel);
         _overlayPanelActive = Marshal.GetDelegateForFunctionPointer<OverlayPanelActiveFn>(api.OverlayPanelActive);
+        _partyWalkGet = Marshal.GetDelegateForFunctionPointer<PartyWalkGetFn>(api.PartyWalkGet);
     }
 
     public int StashAdd(int itemId, int delta) => _stashAdd(itemId, delta);
@@ -220,4 +226,6 @@ internal sealed class NativeGame : INativeGame
     public int OverlayClearPanel() => _overlayClearPanel();
 
     public int OverlayPanelActive() => _overlayPanelActive();
+
+    public int PartyWalkGet(out int x, out int y, out int z) => _partyWalkGet(out x, out y, out z);
 }

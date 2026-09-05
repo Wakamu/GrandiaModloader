@@ -30,6 +30,40 @@ public enum Skill
     Stram = 25,
     /// <summary>Diggin' (<c>99</c>).</summary>
     Diggin = 99,
+    /// <summary>Item-only: restore LV1 MP (<c>100</c>). Pearl, Cholla Flowers.</summary>
+    RestoreLv1Mp = 100,
+    /// <summary>Item-only: restore LV2 MP (<c>101</c>). Bamo Fruit.</summary>
+    RestoreLv2Mp = 101,
+    /// <summary>Item-only: restore LV3 MP (<c>102</c>). Freesia Flowers.</summary>
+    RestoreLv3Mp = 102,
+    /// <summary>Item-only: paralyze (<c>103</c>). Paralyze Mushroom.</summary>
+    ParalyzeItem = 103,
+    /// <summary>Item-only: disease (<c>104</c>). Culture Medium.</summary>
+    DiseaseItem = 104,
+    /// <summary>Item-only: cure paralysis (<c>105</c>). Paralysis Ointment.</summary>
+    CureParalysis = 105,
+    /// <summary>Item-only: vaccine / plague cure (<c>106</c>).</summary>
+    CurePlague = 106,
+    /// <summary>Item-only: eye drops / blindness (<c>107</c>).</summary>
+    CureBlind = 107,
+    /// <summary>Item-only: Torte's Whistle (<c>108</c>).</summary>
+    TortesWhistle = 108,
+    /// <summary>Item-only: smelling salts / wake (<c>109</c>).</summary>
+    SmellingSaltsSkill = 109,
+    /// <summary>Item-only: Bond of Trust (<c>110</c>).</summary>
+    BondOfTrust = 110,
+    /// <summary>Item-only: restore SP (party) (<c>111</c>). Ultra Drink, Golden Potion.</summary>
+    RestoreSpParty = 111,
+    /// <summary>Item-only: restore all MP (<c>112</c>). Blue Medicine, Magic Lamp.</summary>
+    RestoreAllMp = 112,
+    /// <summary>Item-only: restore all MP (party) (<c>113</c>). Spirit Potion.</summary>
+    RestoreAllMpParty = 113,
+    /// <summary>Item-only: restore SP (<c>114</c>). Tear Jewel, Yellow Medicine.</summary>
+    RestoreSp = 114,
+    /// <summary>Item-only: unblock magic (<c>115</c>). Spell Breaker.</summary>
+    UnblockMagic = 115,
+    /// <summary>Item-only: raise max HP in combat (<c>117</c>). Spirit Stone, Staff of Life.</summary>
+    Protein = 117,
     /// <summary>Def-Loss (<c>1</c>).</summary>
     DefLoss = 1,
     /// <summary>WOW! (<c>31</c>).</summary>

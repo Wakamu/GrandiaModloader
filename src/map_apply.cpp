@@ -22,8 +22,10 @@ constexpr std::uintptr_t kScnBindRva = 0x55F2Cu;
 constexpr std::size_t kScnBindPatch = 6u;
 constexpr std::uintptr_t kScnBindResumeRva = 0x55F32u;
 
-constexpr std::uintptr_t kHeapSec7PtrRva = 0x23FA6Cu;  // VA 0x63FA6C
+constexpr std::uintptr_t kHeapSec7PtrRva = 0x23FA6Cu;  // VA 0x63FA6C @ image 0x400000
+constexpr std::uintptr_t kCopySrcPtrRva = 0x319700u;   // VA 0x719700
 constexpr std::uintptr_t kMdpSec7PtrRva = 0x31A714u;   // VA 0x71A714
+constexpr std::uintptr_t kTable1CountRva = 0x31A6A5u;  // VA 0x71A6A5
 constexpr std::uintptr_t kScnPtrRva = 0x31CD30u;       // VA 0x71CD30
 constexpr std::uintptr_t kOfsPtrRva = 0x31CD4Cu;       // VA 0x71CD4C
 constexpr std::uintptr_t kMallocIatRva = 0x1FE334u;    // VA 0x5FE334
@@ -191,6 +193,18 @@ void ApplyScripts() {
     }
 }
 
+void EncodeMovEcxAbs(std::uint8_t* out, std::uintptr_t abs_addr) {
+    out[0] = 0x8B;
+    out[1] = 0x0D;
+    std::memcpy(out + 2, &abs_addr, 4);
+}
+
+void EncodeMovAbsEsi(std::uint8_t* out, std::uintptr_t abs_addr) {
+    out[0] = 0x89;
+    out[1] = 0x35;
+    std::memcpy(out + 2, &abs_addr, 4);
+}
+
 void LogPins(const char* tag) {
     if (g_pin_logs >= 8) {
         return;
@@ -198,10 +212,13 @@ void LogPins(const char* tag) {
     ++g_pin_logs;
     MapPatchInfoNative info{};
     RuntimeMapPatchInfo(g_stem, &info);
-    LogInfo("map bind %s stem=%s heap=%p mdp7=%p scn=%p ofs=%p dirty=%d sec7=%d scn=%d/%d ofs=%d/%d",
+    std::uint8_t t1 = 0;
+    SafeReadByte(ModuleBase() + kTable1CountRva, &t1);
+    LogInfo("map bind %s stem=%s heap=%p mdp7=%p scn=%p ofs=%p dirty=%d sec7=%d scn=%d/%d ofs=%d/%d t1=%u",
             tag, g_stem[0] ? g_stem : "-", ReadGlobal(kHeapSec7PtrRva),
             ReadGlobal(kMdpSec7PtrRva), ReadGlobal(kScnPtrRva), ReadGlobal(kOfsPtrRva), info.dirty,
-            info.sec7_len, info.scn_len, info.stock_scn_len, info.ofs_len, info.stock_ofs_len);
+            info.sec7_len, info.scn_len, info.stock_scn_len, info.ofs_len, info.stock_ofs_len,
+            static_cast<unsigned>(t1));
 }
 
 }  // namespace
@@ -211,6 +228,8 @@ extern "C" void* g_mod_sec7_copy_resume = nullptr;
 extern "C" void* g_mod_sec7_relocate_resume = nullptr;
 extern "C" void* g_mod_scn_bind_resume = nullptr;
 extern "C" void* g_mod_scn_bank_abs = nullptr;
+extern "C" void* g_mod_sec7_copy_src_abs = nullptr;
+extern "C" void* g_mod_sec7_heap_abs = nullptr;
 
 extern "C" void ModAfterSec7Copy() {
     LogPins("sec7-copy");
@@ -218,6 +237,9 @@ extern "C" void ModAfterSec7Copy() {
 }
 
 extern "C" void ModAfterSec7Relocate() {
+    // Image may rebase; apply here so relocate always reads the patched header
+    // even if the post-copy hook missed.
+    ApplySec7();
     LogPins("sec7-relocate");
 }
 
@@ -231,7 +253,8 @@ extern "C" __declspec(naked) void ModSec7CopyDetour() {
         pushad
         call ModAfterSec7Copy
         popad
-        mov ecx, dword ptr [0x719700]
+        mov ecx, dword ptr [g_mod_sec7_copy_src_abs]
+        mov ecx, dword ptr [ecx]
         jmp dword ptr [g_mod_sec7_copy_resume]
     }
 }
@@ -241,7 +264,8 @@ extern "C" __declspec(naked) void ModSec7RelocateDetour() {
         pushad
         call ModAfterSec7Relocate
         popad
-        mov ecx, dword ptr [0x63FA6C]
+        mov ecx, dword ptr [g_mod_sec7_heap_abs]
+        mov ecx, dword ptr [ecx]
         jmp dword ptr [g_mod_sec7_relocate_resume]
     }
 }
@@ -285,13 +309,21 @@ bool InstallMapApplyHooks() {
         return false;
     }
     g_mod_scn_bank_abs = reinterpret_cast<void*>(base + kScnPtrRva);
+    g_mod_sec7_copy_src_abs = reinterpret_cast<void*>(base + kCopySrcPtrRva);
+    g_mod_sec7_heap_abs = reinterpret_cast<void*>(base + kHeapSec7PtrRva);
 
     auto install = [&](std::uintptr_t rva, std::size_t size, const std::uint8_t* expect,
                        void* detour, void** resume_slot, std::uintptr_t resume_rva,
                        std::uint8_t* original, void** site_out, const char* name) {
         auto* site = reinterpret_cast<std::uint8_t*>(base + rva);
         if (!IsExecutableAddress(site) || !BytesMatch(site, expect, size)) {
-            LogWarn("map apply %s site mismatch at +0x%X", name, static_cast<unsigned>(rva));
+            std::uint8_t got[8]{};
+            for (std::size_t i = 0; i < size && i < sizeof(got); ++i) {
+                SafeReadByte(reinterpret_cast<std::uintptr_t>(site) + i, &got[i]);
+            }
+            LogWarn("map apply %s site mismatch at +0x%X exec=%d got=%02X%02X%02X%02X%02X%02X",
+                    name, static_cast<unsigned>(rva), IsExecutableAddress(site) ? 1 : 0, got[0],
+                    got[1], got[2], got[3], got[4], got[5]);
             return false;
         }
         *resume_slot = reinterpret_cast<void*>(base + resume_rva);
@@ -304,9 +336,13 @@ bool InstallMapApplyHooks() {
         return true;
     };
 
-    const std::uint8_t sec7_copy_expect[] = {0x8B, 0x0D, 0x00, 0x97, 0x71, 0x00};
-    const std::uint8_t sec7_rel_expect[] = {0x8B, 0x0D, 0x6C, 0xFA, 0x63, 0x00};
-    const std::uint8_t scn_expect[] = {0x89, 0x35, 0x30, 0xCD, 0x71, 0x00};
+    // Absolute addresses in these movs relocate with ASLR (DYNAMIC_BASE).
+    std::uint8_t sec7_copy_expect[6]{};
+    std::uint8_t sec7_rel_expect[6]{};
+    std::uint8_t scn_expect[6]{};
+    EncodeMovEcxAbs(sec7_copy_expect, base + kCopySrcPtrRva);
+    EncodeMovEcxAbs(sec7_rel_expect, base + kHeapSec7PtrRva);
+    EncodeMovAbsEsi(scn_expect, base + kScnPtrRva);
     int ok = 0;
     ok += install(kSec7CopyDoneRva, kSec7CopyDonePatch, sec7_copy_expect,
                   reinterpret_cast<void*>(&ModSec7CopyDetour), &g_mod_sec7_copy_resume,

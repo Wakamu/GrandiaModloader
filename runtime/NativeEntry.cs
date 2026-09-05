@@ -116,18 +116,19 @@ public unsafe struct WorldMapLoadNative
     public int OriginCtx;
     public int Count;
     public int Dirty;
-    public fixed int Slot[16];
-    public fixed ushort MapId[16];
-    public fixed ushort Aux[16];
-    public fixed short X[16];
-    public fixed short Y[16];
-    public fixed int Revealed[16];
-    public fixed int Picture[16];
-    public fixed ushort Extra[64];
-    public fixed byte ExtraN[16];
-    public fixed byte PicturePath[4160];
-    public fixed short PictureW[16];
-    public fixed short PictureH[16];
+    public fixed int Slot[32];
+    public fixed ushort MapId[32];
+    public fixed ushort Aux[32];
+    public fixed short X[32];
+    public fixed short Y[32];
+    public fixed int Revealed[32];
+    public fixed int Accessible[32];
+    public fixed int Picture[32];
+    public fixed ushort Extra[128];
+    public fixed byte ExtraN[32];
+    public fixed byte PicturePath[8320];
+    public fixed short PictureW[32];
+    public fixed short PictureH[32];
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
@@ -216,6 +217,11 @@ public unsafe struct EnemyLoadedNative
     public fixed int SkillSpeed[8];
     public fixed int SkillElement[8];
     public fixed int SkillUsesStrength[8];
+    public fixed int SkillEffect[8];
+    public fixed int SkillMode[8];
+    public fixed int SkillAdd[8];
+    public fixed int SkillChance[8];
+    public fixed int SkillAddLevel[8];
     public fixed byte SkillName[192];
 }
 
@@ -263,6 +269,8 @@ public struct ItemNative
     public int Para3Post;
     public int Para4Post;
     public int SellPrice;
+    public int Effect;
+    public int EffectValue;
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
@@ -280,7 +288,26 @@ public unsafe struct MagicNative
     public int Area;
     public int Range;
     public int ElementFlags;
+    public int Effect;
+    public int Mode;
+    public int Crit;
     public fixed byte Name[32];
+}
+
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
+public unsafe struct DialogueNative
+{
+    public const int MaxPayload = 4096;
+    public fixed byte Stem[16];
+    public ushort ScriptId;
+    public ushort Pad;
+    public int OpIndex;
+    public int Kind;
+    public uint Src;
+    public int SrcLen;
+    public int DestLen;
+    public fixed byte Dest[MaxPayload];
+    public int Skip;
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
@@ -585,8 +612,8 @@ public static unsafe class NativeEntry
                 }
 
                 dests.Add(new WorldMapDestination(new MapId(req->MapId[i]), req->Aux[i], req->X[i],
-                    req->Y[i], req->Revealed[i] != 0, req->Slot[i], extras, req->Picture[i],
-                    ReadPicturePath(req, i), req->PictureW[i], req->PictureH[i]));
+                    req->Y[i], req->Revealed[i] != 0, req->Accessible[i] != 0, req->Slot[i], extras,
+                    req->Picture[i], ReadPicturePath(req, i), req->PictureW[i], req->PictureH[i]));
             }
 
             var ev = new WorldMapLoadEvent(req->SetId, req->AmapIndex, req->OriginCtx, dests);
@@ -599,7 +626,8 @@ public static unsafe class NativeEntry
                     var a = dests[i];
                     var b = ev.Destinations[i];
                     if (a.Slot != b.Slot || a.Map != b.Map || a.Aux != b.Aux || a.X != b.X ||
-                        a.Y != b.Y || a.Revealed != b.Revealed || a.Picture != b.Picture ||
+                        a.Y != b.Y || a.Revealed != b.Revealed || a.Accessible != b.Accessible ||
+                        a.Picture != b.Picture ||
                         a.PictureWidth != b.PictureWidth || a.PictureHeight != b.PictureHeight ||
                         !string.Equals(a.PicturePath, b.PicturePath, StringComparison.Ordinal))
                     {
@@ -629,6 +657,7 @@ public static unsafe class NativeEntry
                 req->X[outN] = (short)dest.X;
                 req->Y[outN] = (short)dest.Y;
                 req->Revealed[outN] = dest.Revealed ? 1 : 0;
+                req->Accessible[outN] = dest.Accessible ? 1 : 0;
                 req->Picture[outN] = dest.Picture;
                 req->PictureW[outN] = (short)dest.PictureWidth;
                 req->PictureH[outN] = (short)dest.PictureHeight;
@@ -683,6 +712,7 @@ public static unsafe class NativeEntry
             {
                 1 => MapTravelKind.WorldMap,
                 2 => MapTravelKind.Other,
+                3 => MapTravelKind.WorldMapOpen,
                 _ => MapTravelKind.Field,
             };
             var ev = new MapTravelEvent(new MapId(req->From), new MapId(req->Dest), req->Spawn, kind);
@@ -809,6 +839,8 @@ public static unsafe class NativeEntry
                 Para2Post = req->Para2Post,
                 Para3Post = req->Para3Post,
                 Para4Post = req->Para4Post,
+                Effect = (Skill)req->Effect,
+                EffectValue = req->EffectValue,
             };
             ModHost.OnItem(ev, NativeLog);
             req->Cost = ev.Cost;
@@ -816,6 +848,8 @@ public static unsafe class NativeEntry
             req->Icon = ev.Icon;
             req->UseStatus = ev.UseStatus;
             req->Unknown7 = ev.Unknown7;
+            req->Effect = (int)ev.Effect;
+            req->EffectValue = ev.EffectValue;
             req->Para1Pre = ev.Para1Pre;
             req->Para2 = ev.Para2;
             req->Para3 = ev.Para3;
@@ -868,9 +902,12 @@ public static unsafe class NativeEntry
                 Power = req->Power,
                 IpCost = req->IpCost,
                 Cost = req->Cost,
-                Area = req->Area,
+                IpKnockback = req->Area,
                 Range = req->Range,
                 ElementFlags = req->ElementFlags,
+                Effect = (EffectType)req->Effect,
+                Mode = req->Mode,
+                CriticalChance = req->Crit,
             };
             ModHost.OnMagic(ev, NativeLog);
             req->Element = (int)ev.Element;
@@ -878,9 +915,12 @@ public static unsafe class NativeEntry
             req->Power = ev.Power;
             req->IpCost = ev.IpCost;
             req->Cost = ev.Cost;
-            req->Area = ev.Area;
+            req->Area = ev.IpKnockback;
             req->Range = ev.Range;
             req->ElementFlags = ev.ElementFlags;
+            req->Effect = (int)ev.Effect;
+            req->Mode = ev.Mode;
+            req->Crit = ev.CriticalChance;
             var outN = 0;
             foreach (var r in ev.Requirements)
             {
@@ -906,6 +946,62 @@ public static unsafe class NativeEntry
         catch (Exception ex)
         {
             NativeLog($"OnMagic: {ex}");
+            return -1;
+        }
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "GrandiaRuntimeOnDialogue", CallConvs = [typeof(CallConvCdecl)])]
+    public static int OnDialogue(DialogueNative* req)
+    {
+        if (req == null)
+        {
+            return -1;
+        }
+
+        try
+        {
+            if (req->Src == 0 || req->SrcLen <= 0 || req->SrcLen > DialogueNative.MaxPayload)
+            {
+                req->DestLen = 0;
+                req->Skip = 0;
+                return 0;
+            }
+
+            var src = new byte[req->SrcLen];
+            Marshal.Copy((nint)req->Src, src, 0, req->SrcLen);
+            var type8 = req->Kind == (int)DialogueKind.Type8;
+            var stem = ReadFixed(req->Stem, 16);
+            var ev = new DialogueEvent(MapId.Parse(stem), req->ScriptId, req->OpIndex,
+                type8 ? DialogueKind.Type8 : DialogueKind.Type1, src, stem);
+            ModHost.OnDialogue(ev);
+            if (ev.Skip)
+            {
+                req->Skip = 1;
+                req->DestLen = 0;
+                return 0;
+            }
+
+            if (!ev.TryGetReplacement(out var dest) || dest.Length > 0x0FFF)
+            {
+                req->DestLen = 0;
+                req->Skip = 0;
+                return 0;
+            }
+
+            for (var i = 0; i < dest.Length; i++)
+            {
+                req->Dest[i] = dest[i];
+            }
+
+            req->DestLen = dest.Length;
+            req->Skip = 0;
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            NativeLog($"OnDialogue: {ex}");
+            req->DestLen = 0;
+            req->Skip = 0;
             return -1;
         }
     }
@@ -1113,7 +1209,8 @@ public static unsafe class NativeEntry
             {
                 ev.Skills.Add(new EnemySkill(ReadFixedUtf8(&req->SkillName[i * 24], 24),
                     req->SkillPower[i], req->SkillUsesStrength[i] != 0, req->SkillSpeed[i],
-                    req->SkillElement[i]));
+                    req->SkillElement[i], (EffectType)req->SkillEffect[i], req->SkillMode[i],
+                    (StatusAilment)req->SkillAdd[i], req->SkillChance[i], req->SkillAddLevel[i]));
             }
 
             ModHost.OnEnemyLoaded(ev, NativeLog);
@@ -1145,6 +1242,11 @@ public static unsafe class NativeEntry
                 req->SkillSpeed[i] = sk.Speed;
                 req->SkillElement[i] = sk.Element;
                 req->SkillUsesStrength[i] = sk.Strength ? 1 : 0;
+                req->SkillEffect[i] = (int)sk.Effect;
+                req->SkillMode[i] = sk.Mode;
+                req->SkillAdd[i] = (int)sk.AddAilment;
+                req->SkillChance[i] = sk.Chance;
+                req->SkillAddLevel[i] = sk.AddLevel;
             }
 
             return 0;
@@ -1325,7 +1427,7 @@ public static unsafe class NativeEntry
 
     private static string ReadPicturePath(WorldMapLoadNative* req, int index)
     {
-        if (req == null || index < 0 || index >= 16)
+        if (req == null || index < 0 || index >= 32)
         {
             return "";
         }
@@ -1335,7 +1437,7 @@ public static unsafe class NativeEntry
 
     private static void WritePicturePath(WorldMapLoadNative* req, int index, string? path)
     {
-        if (req == null || index < 0 || index >= 16)
+        if (req == null || index < 0 || index >= 32)
         {
             return;
         }

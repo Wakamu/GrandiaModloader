@@ -11,6 +11,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="Grandia.Runtime" />
+    <InternalsVisibleTo Include="Grandia.Sdk.Tests" />
   </ItemGroup>
 
 </Project>

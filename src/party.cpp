@@ -177,9 +177,6 @@ void* g_attach_part_ptr[4]{};
 unsigned g_attach_part_n = 0;
 void* g_attach_lookup_site = nullptr;
 std::uint8_t g_attach_lookup_original[8]{};
-bool g_attach_scan_logged = false;
-bool g_attach_init_wait_logged = false;
-bool g_attach_fill_logged = false;
 std::uint32_t g_attach_inited_168 = 0;
 HANDLE g_party_poll_thread = nullptr;
 volatile LONG g_party_poll_stop = 0;
@@ -451,46 +448,6 @@ void CopyEncounterRow(BattleLoadNative* req, const std::uint8_t* row) {
     }
 }
 
-void FormatSlotHex(char* out, const std::uint8_t* slot) {
-    static constexpr char kHex[] = "0123456789ABCDEF";
-    for (unsigned i = 0; i < kBattleEncounterSlotSize; ++i) {
-        out[i * 2] = kHex[slot[i] >> 4];
-        out[i * 2 + 1] = kHex[slot[i] & 0xF];
-    }
-    out[40] = 0;
-}
-
-void LogEncounterSlots(const char* tag, unsigned n, const std::uint8_t* rec) {
-    if (!tag || !rec) {
-        return;
-    }
-    char s0[41]{};
-    char s1[41]{};
-    char s2[41]{};
-    char s3[41]{};
-    if (n >= 1u) {
-        FormatSlotHex(s0, rec + kBattleEncounterHeader);
-    }
-    if (n >= 2u) {
-        FormatSlotHex(s1, rec + kBattleEncounterHeader + kBattleEncounterSlotSize);
-    }
-    if (n >= 3u) {
-        FormatSlotHex(s2, rec + kBattleEncounterHeader + kBattleEncounterSlotSize * 2u);
-    }
-    if (n >= 4u) {
-        FormatSlotHex(s3, rec + kBattleEncounterHeader + kBattleEncounterSlotSize * 3u);
-    }
-    if (n >= 4u) {
-        LogInfo("%s n=%u s0=%s s1=%s s2=%s s3=%s", tag, n, s0, s1, s2, s3);
-    } else if (n >= 3u) {
-        LogInfo("%s n=%u s0=%s s1=%s s2=%s", tag, n, s0, s1, s2);
-    } else if (n >= 2u) {
-        LogInfo("%s n=%u s0=%s s1=%s", tag, n, s0, s1);
-    } else {
-        LogInfo("%s n=%u s0=%s", tag, n, s0);
-    }
-}
-
 bool WriteEncounterSlots(std::uint8_t* row, const BattleLoadNative* req) {
     if (!row || !req) {
         return false;
@@ -533,11 +490,6 @@ void FillBattleLoadIdentity(BattleLoadNative* req) {
         if (PtrReadable(ctx + 0x64a07u, 16)) {
             auto* m = ctx + 0x64a07u;
             std::memcpy(req->species, m, 16);
-            LogInfo(
-                "enc mdat 64a07="
-                "%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X",
-                m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11], m[12],
-                m[13], m[14], m[15]);
         }
         if (PtrReadable(ctx + 0x7A200u, 4)) {
             const std::uint32_t rel = *reinterpret_cast<std::uint32_t*>(ctx + 0x7A200u);
@@ -569,12 +521,6 @@ void FillBattleLoadIdentity(BattleLoadNative* req) {
     }
     if (row) {
         CopyEncounterRow(req, static_cast<const std::uint8_t*>(row));
-        auto* rec = static_cast<std::uint8_t*>(row);
-        const unsigned n = EncounterLiveSlots(rec);
-        const unsigned bytes = kBattleEncounterHeader + n * kBattleEncounterSlotSize;
-        if (n == 0 || PtrReadable(rec, bytes)) {
-            LogEncounterSlots("OnBattleLoad slots", n, rec);
-        }
     }
 }
 
@@ -599,7 +545,6 @@ void WriteBattleLoadEncounter(const BattleLoadNative* req) {
         LogWarn("OnBattleLoad: failed to write encounter slots");
         return;
     }
-    LogEncounterSlots("OnBattleLoad wrote", n, req->encounter);
 }
 
 void WriteBattleSpeciesMap(const BattleLoadNative* req) {
@@ -622,13 +567,6 @@ void WriteBattleSpeciesMap(const BattleLoadNative* req) {
         LogWarn("OnBattleLoad: failed to write species map");
         return;
     }
-    LogInfo(
-        "OnBattleLoad wrote species 64a07="
-        "%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X",
-        req->species[0], req->species[1], req->species[2], req->species[3], req->species[4],
-        req->species[5], req->species[6], req->species[7], req->species[8], req->species[9],
-        req->species[10], req->species[11], req->species[12], req->species[13], req->species[14],
-        req->species[15]);
     CopyAttachScriptTables(ctx, old_species);
 }
 
@@ -660,11 +598,6 @@ void WriteBattleSetupEncounter(const BattleLoadNative* req, bool write_table, bo
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         LogWarn("OnBattleSetup: failed to write encounter");
         return;
-    }
-    LogInfo("OnBattleSetup wrote table=%u n=%u approach=%u slot=%d", req->encounter[1],
-            req->encounter[6], req->encounter[11], write_slot ? 1 : 0);
-    if (write_slot || write_count) {
-        LogEncounterSlots("OnBattleSetup slots", n, req->encounter);
     }
 }
 
@@ -1029,9 +962,6 @@ void ClearAttachParent() {
     g_attach_parent_ptr = nullptr;
     g_attach_part_n = 0;
     std::memset(g_attach_part_ptr, 0, sizeof(g_attach_part_ptr));
-    g_attach_scan_logged = false;
-    g_attach_init_wait_logged = false;
-    g_attach_fill_logged = false;
     g_attach_inited_168 = 0;
 }
 
@@ -1099,10 +1029,6 @@ bool FillActorModelCopy(std::uint8_t* actor, std::uint8_t* ctx) {
             std::memcpy(actor + 0x10, &h, 2);
         }
     }
-    if (!g_attach_fill_logged) {
-        g_attach_fill_logged = true;
-        LogInfo("Attach model fill 15a=%u blob=%08X 168=%08X 9c=%08X", idx, blob_raw, p168, p9c);
-    }
     return true;
 }
 
@@ -1147,11 +1073,6 @@ void TryInitAttachBody() {
         !PtrReadable(reinterpret_cast<void*>(static_cast<std::uintptr_t>(p168)), 4u) ||
         !PtrReadable(reinterpret_cast<void*>(static_cast<std::uintptr_t>(p9c)), 0x38u) ||
         !PtrReadable(reinterpret_cast<void*>(static_cast<std::uintptr_t>(a878)), 8u)) {
-        if (!g_attach_init_wait_logged) {
-            g_attach_init_wait_logged = true;
-            LogInfo("Attach body wait 168=%08X 9c=%08X a878=%08X 15a=%u", p168, p9c, a878,
-                    body[0x15A]);
-        }
         return;
     }
     __try {
@@ -1160,8 +1081,6 @@ void TryInitAttachBody() {
         fn(g_attach_parent_ptr);
         g_attach_body_inited = true;
         g_attach_inited_168 = p168;
-        LogInfo("Attach body init actor=%u 168=%08X 9c=%08X a878=%08X", g_attach_parent_id, p168, p9c,
-                a878);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         LogWarn("Attach body init failed");
     }
@@ -1306,27 +1225,7 @@ void LinkAttachedEnemies(bool game_thread) {
     }
 
     if (occ == 0) {
-        if (map_has_attach && !g_attach_scan_logged) {
-            g_attach_scan_logged = true;
-            LogInfo("Attach scan occ=0 (waiting for combatants)");
-        }
         return;
-    }
-    if (map_has_attach && !g_attach_scan_logged) {
-        g_attach_scan_logged = true;
-        LogInfo("Attach scan occ=%u a189=%u,%u,%u id=%u,%u,%u g=%u,%u,%u p=%u,%u,%u a15a=%u,%u,%u", occ,
-                occ > 0 ? static_cast<std::uint8_t*>(found[0])[0x189] : 0,
-                occ > 1 ? static_cast<std::uint8_t*>(found[1])[0x189] : 0,
-                occ > 2 ? static_cast<std::uint8_t*>(found[2])[0x189] : 0, found_id[0], found_id[1],
-                found_id[2], occ > 0 ? static_cast<std::uint8_t*>(found[0])[0x18A] : 0,
-                occ > 1 ? static_cast<std::uint8_t*>(found[1])[0x18A] : 0,
-                occ > 2 ? static_cast<std::uint8_t*>(found[2])[0x18A] : 0,
-                occ > 0 ? static_cast<std::uint8_t*>(found[0])[0x18B] : 0,
-                occ > 1 ? static_cast<std::uint8_t*>(found[1])[0x18B] : 0,
-                occ > 2 ? static_cast<std::uint8_t*>(found[2])[0x18B] : 0,
-                occ > 0 ? static_cast<std::uint8_t*>(found[0])[0x15A] : 0,
-                occ > 1 ? static_cast<std::uint8_t*>(found[1])[0x15A] : 0,
-                occ > 2 ? static_cast<std::uint8_t*>(found[2])[0x15A] : 0);
     }
     if (!map_has_attach) {
         g_attach_linked = true;
@@ -1374,7 +1273,6 @@ void LinkAttachedEnemies(bool game_thread) {
     if (game_thread) {
         TryInitAttachBody();
     }
-    LogInfo("Attach parent actor=%u ptr=%p occ=%u parts=%u", body_id, body, occ, attachments);
 }
 
 bool FileExistsA(const char* path) {
@@ -1749,6 +1647,11 @@ void ParseEnemySkills(std::uint8_t* model, std::size_t model_bytes, grandia_mod:
         req.skill_power[i] = Read16(p + 6);
         req.skill_speed[i] = p[0x13];
         req.skill_element[i] = p[0xA];
+        req.skill_effect[i] = p[0xD];
+        req.skill_mode[i] = p[0xE];
+        req.skill_add[i] = p[0xF];
+        req.skill_chance[i] = p[0x10];
+        req.skill_add_level[i] = p[0x11];
         req.skill_uses_strength[i] = (Read16(p + 8) & 1u) ? 0 : 1;
         auto* q = p + 22;
         if (!SkipCString(q, end)) {
@@ -1813,6 +1716,7 @@ constexpr std::uintptr_t kWindtSec3AliasRvas[] = {
 struct ShopPriceRestore {
     std::uint16_t id;
     std::uint16_t cost;
+    std::uint16_t override_cost;
 };
 ShopPriceRestore g_shop_price_restore[64]{};
 unsigned g_shop_price_restore_n = 0;
@@ -1893,18 +1797,26 @@ void WriteWindtCost(int item_id, int gold) {
     }
 }
 
-void RememberShopPrice(int item_id, int old_cost) {
+void RememberShopPrice(int item_id, int old_cost, int want) {
     if (item_id < 1 || item_id > 511 || g_shop_price_restore_n >= 64u) {
         return;
     }
+    if (want < 0) {
+        want = 0;
+    }
+    if (want > 0xFFFF) {
+        want = 0xFFFF;
+    }
     for (unsigned i = 0; i < g_shop_price_restore_n; ++i) {
         if (g_shop_price_restore[i].id == static_cast<std::uint16_t>(item_id)) {
+            g_shop_price_restore[i].override_cost = static_cast<std::uint16_t>(want);
             return;
         }
     }
     g_shop_price_restore[g_shop_price_restore_n].id = static_cast<std::uint16_t>(item_id);
     g_shop_price_restore[g_shop_price_restore_n].cost =
         static_cast<std::uint16_t>(old_cost < 0 ? 0 : old_cost > 0xFFFF ? 0xFFFF : old_cost);
+    g_shop_price_restore[g_shop_price_restore_n].override_cost = static_cast<std::uint16_t>(want);
     ++g_shop_price_restore_n;
 }
 
@@ -1929,7 +1841,6 @@ void ApplySellOverrides(const grandia_mod::ShopOpenNative& req) {
         }
         g_sell_set[id] = 1;
         g_sell_gold[id] = static_cast<std::uint16_t>(gold);
-        grandia_mod::LogInfo("ShopSell price id=%d -> %d", id, gold);
     }
 }
 
@@ -1941,10 +1852,24 @@ void RestoreShopPricesInternal() {
     ClearSellOverrides();
 }
 
+void ReapplyShopSessionPricesInternal() {
+    for (unsigned i = 0; i < g_shop_price_restore_n; ++i) {
+        WriteWindtCost(g_shop_price_restore[i].id, g_shop_price_restore[i].override_cost);
+    }
+}
+
 }  // namespace
 
 void grandia_mod::RestoreShopPriceOverrides() {
     RestoreShopPricesInternal();
+}
+
+void grandia_mod::ReapplyShopSessionPrices() {
+    ReapplyShopSessionPricesInternal();
+}
+
+extern "C" void ModReapplyShopSessionPrices() {
+    grandia_mod::ReapplyShopSessionPrices();
 }
 
 extern "C" int ModSellGoldFromRec(void* rec) {
@@ -1973,7 +1898,6 @@ extern "C" void ModOnSellOpen() {
         params && grandia_mod::PtrReadable(params, 2u)) {
         req.map = Read16(static_cast<std::uint8_t*>(params));
     }
-    grandia_mod::LogInfo("ShopOpen map=%04X kind=2 (sell)", req.map);
     if (grandia_mod::RuntimeOnShopOpen(&req) != 0) {
         return;
     }
@@ -2001,25 +1925,6 @@ extern "C" void ModOnShopOpen(int kind) {
         req.items[i] = Read16(p + grandia_mod::kShopStockOff + i * 2u);
         req.prices[i] = req.items[i] > 0 ? ReadWindtCost(req.items[i]) : 0;
     }
-    grandia_mod::LogInfo("ShopOpen map=%04X kind=%d", req.map, req.kind);
-    for (unsigned page = 0; page < grandia_mod::kShopPages; ++page) {
-        char buf[200]{};
-        int n = 0;
-        for (unsigned i = 0; i < grandia_mod::kShopSlots; ++i) {
-            const int id = req.items[page * grandia_mod::kShopSlots + i];
-            if (id <= 0) {
-                continue;
-            }
-            n += std::snprintf(buf + n, sizeof(buf) - static_cast<std::size_t>(n),
-                               n ? " %d@%d" : "%d@%d", id, req.prices[page * grandia_mod::kShopSlots + i]);
-            if (n < 0 || static_cast<std::size_t>(n) + 12 >= sizeof(buf)) {
-                break;
-            }
-        }
-        if (n > 0) {
-            grandia_mod::LogInfo("ShopOpen page[%u] %s", page, buf);
-        }
-    }
     if (grandia_mod::RuntimeOnShopOpen(&req) != 0) {
         return;
     }
@@ -2034,11 +1939,8 @@ extern "C" void ModOnShopOpen(int kind) {
         }
         const int want = req.prices[i];
         const int now = ReadWindtCost(id);
-        if (want != now) {
-            RememberShopPrice(id, now);
-            WriteWindtCost(id, want);
-            grandia_mod::LogInfo("ShopOpen price id=%d %d -> %d", id, now, want);
-        }
+        RememberShopPrice(id, now, want);
+        WriteWindtCost(id, want);
     }
     ApplySellOverrides(req);
 }
@@ -2104,21 +2006,7 @@ extern "C" void ModOnEnemyLoaded(void* actor) {
         if (waited_n < 16u) {
             waited[waited_n++] = actor;
         }
-        grandia_mod::LogInfo("EnemyLoaded wait id=%d cat=%d form=%d (model not ready)", req.actor_id,
-                             req.catalog, req.form_row);
         return;
-    }
-    grandia_mod::LogInfo(
-        "EnemyLoaded id=%d cat=%d form=%d lv=%d hp=%d/%d str=%d vit=%d wit=%d agi=%d exp=%d gp=%d "
-        "atk=%d rng=%d drop=%d@%d,%d@%d resist=%d/%d/%d/%d skills=%d",
-        req.actor_id, req.catalog, req.form_row, req.level, req.hp, req.max_hp, req.str, req.vit, req.wit,
-        req.agi, req.exp, req.gold, req.attack_count, req.attack_range, req.drop_item[0], req.drop_rate[0],
-        req.drop_item[1], req.drop_rate[1], req.fire_resist, req.water_resist, req.wind_resist,
-        req.earth_resist, req.skill_count);
-    for (int i = 0; i < req.skill_count && i < 8; ++i) {
-        grandia_mod::LogInfo("EnemyLoaded skill[%d] %s pwr=%d str=%d spd=%d el=%d", i,
-                             req.skill_name[i][0] ? req.skill_name[i] : "?", req.skill_power[i],
-                             req.skill_uses_strength[i], req.skill_speed[i], req.skill_element[i]);
     }
     if (grandia_mod::RuntimeOnEnemyLoaded(&req) != 0) {
         return;
@@ -2173,6 +2061,11 @@ extern "C" void ModOnEnemyLoaded(void* actor) {
             }
             Write16(hdr + 6, req.skill_power[i]);
             hdr[0xA] = ClampU8(req.skill_element[i]);
+            hdr[0xD] = ClampU8(req.skill_effect[i]);
+            hdr[0xE] = ClampU8(req.skill_mode[i]);
+            hdr[0xF] = ClampU8(req.skill_add[i]);
+            hdr[0x10] = ClampU8(req.skill_chance[i]);
+            hdr[0x11] = ClampU8(req.skill_add_level[i]);
             hdr[0x13] = ClampU8(req.skill_speed[i]);
             auto flags = Read16(hdr + 8);
             if (req.skill_uses_strength[i]) {
@@ -2186,14 +2079,7 @@ extern "C" void ModOnEnemyLoaded(void* actor) {
 }
 
 extern "C" void ModAfterEnemyModelCopy(void* actor) {
-    if (actor && grandia_mod::PtrReadable(actor, 0x16Cu)) {
-        auto* a = static_cast<std::uint8_t*>(actor);
-        std::uint32_t p168 = 0;
-        std::uint32_t p9c = 0;
-        std::memcpy(&p168, a + 0x168, 4);
-        std::memcpy(&p9c, a + 0x9C, 4);
-        grandia_mod::LogInfo("Attach model-copy 15a=%u 168=%08X 9c=%08X", a[0x15A], p168, p9c);
-    }
+    (void)actor;
     grandia_mod::LinkAttachedEnemies(true);
 }
 
@@ -2312,8 +2198,6 @@ extern "C" int ModFillUiPartyCache(unsigned which) {
     if (auto* map_obj = grandia_mod::MapObject()) {
         grandia_mod::SeedMissingCharacterBlocks(map_obj, want, n);
     }
-    grandia_mod::LogInfo("Party: OnMenuOpen which=%u roster=%u,%u,%u,%u", which, want[0], want[1],
-                         want[2], want[3]);
     return 1;
 }
 
@@ -2431,9 +2315,6 @@ void OnBattleSetup() {
     const std::uint8_t count0 = req.encounter[6];
     std::uint8_t slots0[kBattleEncounterDump - kBattleEncounterHeader]{};
     std::memcpy(slots0, req.encounter + kBattleEncounterHeader, sizeof(slots0));
-    LogInfo("OnBattleSetup id form=%u map=%04X dest=%04X from=%04X table=%u row=%u approach=%u n=%u",
-            req.formation, req.map, req.dest, req.spawn & 0xFFFF, req.encounter[1], req.encounter[13],
-            req.encounter[11], req.encounter[6]);
 
     if (RuntimeOnBattleSetup(&req) != 0) {
         return;
@@ -2477,15 +2358,6 @@ void OnBattleLoad() {
     const std::uint8_t count0 = req.encounter[6];
     std::uint8_t spec_orig[16]{};
     std::memcpy(spec_orig, req.species, 16);
-    LogInfo(
-        "OnBattleLoad id form=%u map=%04X dest=%04X from=%04X mode=%u table=%u row=%u approach=%u "
-        "pack=%u,%u,%u,%u enc=%02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X",
-        req.formation, req.map, req.dest, req.spawn & 0xFFFF, req.battle_mode, req.encounter[1],
-        req.encounter[13], req.encounter[11], req.pack_w0, req.pack_w2, req.pack_w4, req.pack_w6,
-        req.encounter[0], req.encounter[1], req.encounter[2], req.encounter[3], req.encounter[4],
-        req.encounter[5], req.encounter[6], req.encounter[7], req.encounter[8], req.encounter[9],
-        req.encounter[10], req.encounter[11], req.encounter[12], req.encounter[13],
-        req.encounter[14], req.encounter[15]);
 
     if (RuntimeOnBattleLoad(&req) != 0) {
         return;
@@ -2513,8 +2385,6 @@ void OnBattleLoad() {
             ClearFightOverride();
         }
         g_mod_party_staged = 0;
-        LogInfo("OnBattleLoad party=%u,%u,%u,%u (field, no stage)", true_field[0], true_field[1],
-                true_field[2], true_field[3]);
         return;
     }
 
@@ -2539,11 +2409,6 @@ void OnBattleLoad() {
     g_saw_fight_spawn = false;
     PatchFormationTableForBattle();
     SetBattleCullPatches(true);
-    std::uint8_t mode = 0;
-    SafeReadByte(ModuleBase() + kBattleModeRva, &mode);
-    LogInfo("OnBattleLoad stage %u,%u,%u,%u (field snap %u,%u,%u,%u) mode=%u", want[0], want[1],
-            want[2], want[3], g_saved_field0a[0], g_saved_field0a[1], g_saved_field0a[2],
-            g_saved_field0a[3], mode);
 }
 
 void TryRestoreFieldParty(bool field_map_fopen) {

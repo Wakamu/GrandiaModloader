@@ -12,12 +12,12 @@
 #include "save.h"
 #include "title.h"
 #include "catalog.h"
+#include "dialogue.h"
 #include "movie_skip.h"
 #include "travel.h"
 
 #include <Windows.h>
 
-#include <atomic>
 #include <cstdint>
 #include <cstring>
 
@@ -68,8 +68,6 @@ std::uint8_t g_assign_ui_original[8]{};
 void* g_field_gold_site = nullptr;
 std::uint8_t g_field_gold_original[8]{};
 void* g_field_gold_trampoline_mem = nullptr;
-
-std::atomic<unsigned> g_event_log_left{32};
 
 volatile unsigned g_pending_loot_event = 0;
 volatile int g_arm_skip_assign = 0;
@@ -149,16 +147,6 @@ void OnFlagWrite(unsigned event_id, unsigned flag_offset, unsigned flag_value, u
         g_arm_skip_assign = req.suppress_loot;
         g_arm_suppress_gold = req.suppress_gold;
     }
-
-    const unsigned left = g_event_log_left.load();
-    if (left > 0 && g_event_log_left.fetch_sub(1) > 0) {
-        LogInfo("OnEventFlag event=0x%04X kind=%d caller=+0x%X mask=0x%02X loot=%d gold=%d", event_id,
-                kind, static_cast<unsigned>(caller_rva), mask & 0xFFu, req.suppress_loot,
-                req.suppress_gold);
-    } else if (req.suppress_loot || req.suppress_gold) {
-        LogInfo("OnEventFlag event=0x%04X suppress loot=%d gold=%d", event_id, req.suppress_loot,
-                req.suppress_gold);
-    }
 }
 
 int OnAssignUi(std::uintptr_t return_addr) {
@@ -177,7 +165,6 @@ int OnAssignUi(std::uintptr_t return_addr) {
     }
 
     if (req.skip_vanilla) {
-        LogInfo("OnItemAssignUi skip vanilla event=0x%04X", req.event_id);
         g_arm_suppress_gold = 0;
         g_pending_loot_event = 0;
         g_arm_skip_assign = 0;
@@ -195,10 +182,6 @@ int OnFieldGold(int amount) {
 
     if (RuntimeOnFieldGoldAdd(&req) != 0) {
         return amount;
-    }
-
-    if (req.amount != amount) {
-        LogInfo("OnFieldGoldAdd event=0x%04X amount %d -> %d", req.event_id, amount, req.amount);
     }
 
     if (g_pending_loot_event != 0 && g_arm_suppress_gold) {
@@ -543,6 +526,9 @@ bool InstallGameHooks() {
     if (!InstallScriptRedirectHooks()) {
         LogWarn("OnScriptExecute / OnCallHook hooks not installed");
     }
+    if (!InstallDialogueHook()) {
+        LogWarn("OnDialogue hook not installed");
+    }
     if (!InstallQolHooks()) {
         LogWarn("QoL turbo / OnTick hooks not installed");
     }
@@ -568,6 +554,7 @@ void RemoveGameHooks() {
     RemoveCatalogHooks();
     RemoveTitleScreenHook();
     RemoveQolHooks();
+    RemoveDialogueHook();
     RemoveScriptRedirectHooks();
     RemoveWorldMapPictureHook();
     RemovePartyHooks();

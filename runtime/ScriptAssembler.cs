@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using Grandia.Sdk;
 
 namespace Grandia.Runtime;
 
@@ -24,7 +25,8 @@ internal static class ScriptAssembler
             }
         }
 
-        var bytes = RunEmit(stem, scriptId, asm, cfg);
+        _ = cfg;
+        var bytes = FieldScriptAsm.Assemble(asm, scriptId, stem);
         lock (Cache)
         {
             Cache[key] = bytes;
@@ -38,22 +40,5 @@ internal static class ScriptAssembler
     {
         var raw = Encoding.UTF8.GetBytes($"{stem}\n{scriptId:X4}\n{asm}");
         return Convert.ToHexString(SHA256.HashData(raw));
-    }
-
-    private static byte[] RunEmit(string stem, int scriptId, string asm, ModsConfig cfg)
-    {
-        var cache = string.IsNullOrWhiteSpace(cfg.Cache)
-            ? Path.Combine(Path.GetTempPath(), "GrandiaMod")
-            : cfg.Cache;
-        var dir = Path.Combine(cache, "_asm");
-        Directory.CreateDirectory(dir);
-        var src = Path.Combine(dir, $"{stem}_{scriptId:X4}.asm");
-        var dest = Path.Combine(dir, $"{stem}_{scriptId:X4}.bin");
-        File.WriteAllText(src, asm, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
-
-        var stemArg = string.IsNullOrWhiteSpace(stem) ? "" : $"{stem} ";
-        FieldTools.Run(cfg, $"script {stemArg}--emit {FieldTools.Quote(src)} -o {FieldTools.Quote(dest)}",
-            "field_tools script");
-        return File.Exists(dest) ? File.ReadAllBytes(dest) : [];
     }
 }

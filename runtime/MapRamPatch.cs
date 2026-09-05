@@ -88,9 +88,26 @@ internal sealed class MapRamPatch
     }
 }
 
+/// <summary>
+/// One-shot script arms from <c>OnScriptExecute</c>. Kept pinned for the VM
+/// but never reused as the next event's default bytecode.
+/// </summary>
+internal static class ScriptArmStore
+{
+    private static readonly Dictionary<(string Stem, int Id), RedirectBlob> Pins = new();
+
+    public static nint Pin(string stem, int id, byte[] bytes)
+    {
+        var blob = new RedirectBlob { Id = id, Bytes = bytes };
+        blob.Pin();
+        Pins[(stem, id)] = blob;
+        return blob.Ptr;
+    }
+}
+
 internal static class MapRamStore
 {
-    private const int Sec7Budget = 0x4000;
+    internal const int Sec7Budget = 0x4000;
     private static readonly Dictionary<string, MapRamPatch?> Patches = new(StringComparer.OrdinalIgnoreCase);
 
     public static bool Has(string stem) => Patches.ContainsKey(stem);

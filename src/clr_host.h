@@ -110,7 +110,7 @@ struct MapTravelNative {
 #pragma pack(pop)
 static_assert(sizeof(MapTravelNative) == 16, "MapTravelNative pack must match C#");
 
-constexpr unsigned kWorldMapSlots = 16;
+constexpr unsigned kWorldMapSlots = 32;
 
 struct WorldMapLoadNative {
     std::int32_t set_id;
@@ -124,6 +124,7 @@ struct WorldMapLoadNative {
     std::int16_t x[kWorldMapSlots];
     std::int16_t y[kWorldMapSlots];
     std::int32_t revealed[kWorldMapSlots];
+    std::int32_t accessible[kWorldMapSlots];
     std::int32_t picture[kWorldMapSlots];
     std::uint16_t extra[kWorldMapSlots * 4];
     std::uint8_t extra_n[kWorldMapSlots];
@@ -131,7 +132,7 @@ struct WorldMapLoadNative {
     std::int16_t picture_w[kWorldMapSlots];
     std::int16_t picture_h[kWorldMapSlots];
 };
-static_assert(sizeof(WorldMapLoadNative) == 4708, "WorldMapLoadNative pack must match C#");
+static_assert(sizeof(WorldMapLoadNative) == 9524, "WorldMapLoadNative pack must match C#");
 #pragma pack(pop)
 
 constexpr int kMaxSaveTrailer = 1024;
@@ -219,6 +220,11 @@ struct EnemyLoadedNative {
     std::int32_t skill_speed[8];
     std::int32_t skill_element[8];
     std::int32_t skill_uses_strength[8];
+    std::int32_t skill_effect[8];
+    std::int32_t skill_mode[8];
+    std::int32_t skill_add[8];
+    std::int32_t skill_chance[8];
+    std::int32_t skill_add_level[8];
     char skill_name[8][24];
 };
 #pragma pack(pop)
@@ -304,9 +310,11 @@ struct ItemNative {
     std::int32_t para3_post;
     std::int32_t para4_post;
     std::int32_t sell_price;
+    std::int32_t effect;
+    std::int32_t effect_value;
 };
 #pragma pack(pop)
-static_assert(sizeof(ItemNative) == 56, "ItemNative pack must match C#");
+static_assert(sizeof(ItemNative) == 64, "ItemNative pack must match C#");
 
 #pragma pack(push, 1)
 struct MagicNative {
@@ -322,13 +330,37 @@ struct MagicNative {
     std::int32_t area;
     std::int32_t range;
     std::int32_t element_flags;
+    std::int32_t effect;
+    std::int32_t mode;
+    std::int32_t crit;
     char name[32];
 };
 #pragma pack(pop)
-static_assert(sizeof(MagicNative) == 104, "MagicNative pack must match C#");
+static_assert(sizeof(MagicNative) == 116, "MagicNative pack must match C#");
 
 int RuntimeOnCharacter(CharacterNative* req);
 int RuntimeOnItem(ItemNative* req);
 int RuntimeOnMagic(MagicNative* req);
+
+constexpr unsigned kDialogueMaxPayload = 4096;
+
+#pragma pack(push, 1)
+struct DialogueNative {
+    char stem[16];
+    std::uint16_t script_id;
+    std::uint16_t pad;
+    std::int32_t op_index;
+    std::int32_t kind;
+    std::uint32_t src;
+    std::int32_t src_len;
+    std::int32_t dest_len;
+    std::uint8_t dest[kDialogueMaxPayload];
+    std::int32_t skip;
+};
+#pragma pack(pop)
+static_assert(sizeof(DialogueNative) == 16 + 2 + 2 + 4 + 4 + 4 + 4 + 4 + 4096 + 4,
+              "DialogueNative pack must match C#");
+
+int RuntimeOnDialogue(DialogueNative* req);
 
 }  // namespace grandia_mod

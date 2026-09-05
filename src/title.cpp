@@ -17,7 +17,6 @@ void ModTitleScreenDetour();
 
 extern "C" void ModOnTitleScreen() {
     grandia_mod::ResetCharacterSession();
-    grandia_mod::LogInfo("OnTitleScreen");
     grandia_mod::RuntimeOnTitleScreen();
 }
 

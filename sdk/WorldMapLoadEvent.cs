@@ -2,7 +2,7 @@ namespace Grandia.Sdk;
 
 /// <summary>
 /// Area map is opening at +0x59320. <see cref="Destinations"/> is the
-/// <em>icons</em> on this set (up to 16), each with a stable icon
+/// <em>icons</em> on this set (up to 32), each with a stable icon
 /// <see cref="WorldMapDestination.Slot"/>. Travel dest can vary by
 /// <see cref="OriginContext"/> (field world-map exit param at <c>[64122A]</c>)
 /// — Lama is one icon, North vs South is not a second slot. An unchanged
@@ -10,7 +10,7 @@ namespace Grandia.Sdk;
 /// </summary>
 public sealed class WorldMapLoadEvent
 {
-    public const int SlotCount = 16;
+    public const int SlotCount = 32;
 
     public WorldMapLoadEvent(int set, int amapIndex, int originContext = 0,
         IEnumerable<WorldMapDestination>? destinations = null)
@@ -37,11 +37,12 @@ public sealed class WorldMapLoadEvent
     public List<WorldMapDestination> Destinations { get; }
 
     public void Add(MapId map, int x = 0, int y = 0, int aux = 0, int picture = 0,
-        string? picturePath = null, int pictureWidth = 0, int pictureHeight = 0)
+        string? picturePath = null, int pictureWidth = 0, int pictureHeight = 0,
+        bool accessible = true)
     {
-        Destinations.Add(new WorldMapDestination(map, aux, x, y, revealed: true, slot: -1,
-            picture: picture, picturePath: picturePath, pictureWidth: pictureWidth,
-            pictureHeight: pictureHeight));
+        Destinations.Add(new WorldMapDestination(map, aux, x, y, revealed: true,
+            accessible: accessible, slot: -1, picture: picture, picturePath: picturePath,
+            pictureWidth: pictureWidth, pictureHeight: pictureHeight));
     }
 
     public bool Remove(MapId map) => Destinations.RemoveAll(d => d.Map == map) > 0;
@@ -62,8 +63,8 @@ public sealed class WorldMapLoadEvent
             }
 
             list.Add(new WorldMapDestination(dest.Map, dest.Aux, dest.X, dest.Y, dest.Revealed,
-                dest.Slot, dest.Variants, dest.Picture, dest.PicturePath, dest.PictureWidth,
-                dest.PictureHeight));
+                dest.Accessible, dest.Slot, dest.Variants, dest.Picture, dest.PicturePath,
+                dest.PictureWidth, dest.PictureHeight));
         }
 
         return list;

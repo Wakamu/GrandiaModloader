@@ -47,6 +47,20 @@ public sealed class ItemEvent
     /// <summary>u16 at record+2.</summary>
     public int UseStatus { get; set; }
 
+    /// <summary>
+    /// Skill / item-effect id at record+9. Herbs is <see cref="Skill.Heal"/>,
+    /// Dynamite is <see cref="Skill.Burnflame"/>, Cholla Flowers is
+    /// <see cref="Skill.RestoreLv1Mp"/>. 0 = not a usable combat effect
+    /// (equipment, keys, seeds).
+    /// </summary>
+    public Skill Effect { get; set; }
+
+    /// <summary>
+    /// Magnitude at record+10 for <see cref="Effect"/> (heal amount, status
+    /// chance, spell power override). Herbs is 15.
+    /// </summary>
+    public int EffectValue { get; set; }
+
     /// <summary>u8 at record+7.</summary>
     public int Unknown7 { get; set; }
 

@@ -171,6 +171,16 @@ public static class ModHost
                 map.Hooks.SeedOccupied(LoadOccupiedHookIds(stem, Config.Field));
             }
 
+            void HydrateSec7()
+            {
+                var vanilla = TryLoadVanillaMdp(stem, Config, embedded ? packed?.Mdp : null);
+                Sec7Hydrator.Attach(map, vanilla, log);
+            }
+
+            map.Zones.Ensure = HydrateSec7;
+            map.Hooks.Ensure = HydrateSec7;
+            map.EnsureEncounters = HydrateSec7;
+
             var cache = string.IsNullOrWhiteSpace(cacheDir)
                 ? Config?.Cache ?? ""
                 : cacheDir;
@@ -201,25 +211,42 @@ public static class ModHost
                 }
 
                 MapRamStore.MarkClean(stem);
-                log?.Invoke($"OnMapOpen {stem} hydrate={hydrateMs}ms dirty=0");
                 return 0;
             }
 
-            var outDir = cache;
-            if (string.IsNullOrWhiteSpace(outDir) || Config is null)
+            if (Config is null)
             {
-                throw new InvalidOperationException("cache dir is empty");
+                throw new InvalidOperationException("mods config is missing");
             }
 
             sw.Restart();
-            PatchEmitter.Emit(map, Config, outDir, log);
-            var dirtyScripts = map.Scripts.Where(s => s.Dirty).Select(s => s.Id).ToArray();
-            var dirtyHooks = map.Hooks.Items.Where(h => h.Dirty).Select(h => h.Id).ToArray();
-            var ram = MapRamStore.LoadEmitted(stem, outDir, Config, dirtyScripts, dirtyHooks);
+            var patch = MapRamStore.Get(stem) ?? new MapRamPatch();
+            if (map.Hooks.Dirty || map.Zones.Dirty)
+            {
+                var vanilla = LoadVanillaSec7(stem, Config, embedded ? packed?.Mdp : null);
+                var sec7 = MdpSec7.Apply(vanilla, map);
+                if (sec7.Length > MapRamStore.Sec7Budget)
+                {
+                    sec7 = sec7.AsSpan(0, MapRamStore.Sec7Budget).ToArray();
+                }
+
+                patch = new MapRamPatch { Sec7 = sec7 };
+                foreach (var hook in map.Hooks.Items.Where(h => h.Dirty && !string.IsNullOrWhiteSpace(h.Line)))
+                {
+                    patch.SetHook(hook.Id, FieldHookAsm.AssembleHook(hook.Line!, hook.Id));
+                }
+            }
+
+            foreach (var script in map.Scripts.Where(s => s.Dirty))
+            {
+                patch.SetScript(script.Id, script.ToBytecode());
+            }
+
+            MapRamStore.LoadLive(stem, patch);
             log?.Invoke(
-                $"OnMapOpen {stem} hydrate={hydrateMs}ms emit={sw.ElapsedMilliseconds}ms ram sec7={ram.Sec7.Length} scn={ram.Scn.Length} ofs={ram.Ofs.Length} scripts={ram.Scripts.Count} hooks={ram.Hooks.Count}");
+                $"OnMapOpen {stem} hydrate={hydrateMs}ms emit={sw.ElapsedMilliseconds}ms sec7={patch.Sec7.Length} scripts={patch.Scripts.Count} hooks={patch.Hooks.Count} (in-process)");
             Assembled.Add(stem);
-            return MapRamStore.IsDirty(stem) ? 1 : 0;
+            return 1;
         }
     }
 
@@ -311,6 +338,11 @@ public static class ModHost
     public static void OnMagic(MagicEvent ev, Action<string>? log = null)
     {
         InvokeHooks("OnMagic", ev);
+    }
+
+    public static void OnDialogue(DialogueEvent ev, Action<string>? log = null)
+    {
+        InvokeHooks("OnDialogue", ev);
     }
 
     private static void InvokeHooks<TEvent>(string name, TEvent ev)
@@ -502,6 +534,33 @@ public static class ModHost
         return null;
     }
 
+    private static byte[] LoadVanillaSec7(string stem, ModsConfig cfg, byte[]? embeddedMdp) =>
+        MdpHookIds.TrySlice(TryLoadVanillaMdp(stem, cfg, embeddedMdp), 7)
+        ?? throw new InvalidOperationException($"{stem}: no MDP sec[7] for hook/zone assemble");
+
+    private static byte[]? TryLoadVanillaMdp(string stem, ModsConfig? cfg, byte[]? embeddedMdp)
+    {
+        if (embeddedMdp is { Length: > 0 })
+        {
+            return embeddedMdp;
+        }
+
+        if (cfg is null || string.IsNullOrWhiteSpace(cfg.Field))
+        {
+            return null;
+        }
+
+        foreach (var path in HookMdpCandidates(stem, cfg.Field))
+        {
+            if (File.Exists(path))
+            {
+                return File.ReadAllBytes(path);
+            }
+        }
+
+        return null;
+    }
+
     private static IEnumerable<int> LoadOccupiedHookIds(string stem, string fieldDir)
     {
         foreach (var path in HookMdpCandidates(stem, fieldDir))
@@ -573,6 +632,15 @@ public static class ModHost
                     ? blob.Bytes
                     : null,
             };
+            if (ScriptHydrator.TryGet(stem, scriptId, Config, out var stock))
+            {
+                ev.Script.AttachVanilla(stock, stem);
+            }
+            else if (ev.Bytecode is { Length: > 0 })
+            {
+                ev.Script.AttachVanilla(ev.Bytecode, stem);
+            }
+
             Hooks.Invoke("OnScriptExecute", ev);
 
             if (ev.Skip)
@@ -585,11 +653,9 @@ public static class ModHost
             {
                 if (Config is null)
                 {
-                    log?.Invoke($"OnScriptExecute 0x{scriptId:X4} on {stem}: no config, vanilla");
                     return 0;
                 }
 
-                log?.Invoke($"OnScriptExecute replace 0x{scriptId:X4} on {stem} (assembling)");
                 try
                 {
                     bytes = ScriptAssembler.Assemble(stem, scriptId, ev.Script.ToAsm(), Config, log);
@@ -600,30 +666,22 @@ public static class ModHost
                     return 0;
                 }
             }
-            else if (!string.IsNullOrEmpty(ev.EmbeddedName))
-            {
-                log?.Invoke($"OnScriptExecute 0x{scriptId:X4} on {stem} (embedded {ev.EmbeddedName})");
-            }
 
             if (bytes is not { Length: > 0 })
             {
                 return 0;
             }
 
-            if (patch == null)
+            if (patch != null && patch.Scripts.TryGetValue(scriptId, out var persist) &&
+                ReferenceEquals(persist.Bytes, bytes))
             {
-                patch = new MapRamPatch();
-                MapRamStore.LoadLive(stem, patch);
+                ip = (uint)persist.Ptr;
+                return ip == 0 ? 0 : 1;
             }
 
-            if (!patch.Scripts.TryGetValue(scriptId, out var cached) ||
-                !ReferenceEquals(cached.Bytes, bytes))
-            {
-                patch.SetScript(scriptId, bytes);
-                cached = patch.Scripts[scriptId];
-            }
-
-            ip = (uint)cached.Ptr;
+            // Pin for this arm only. Do not write MapRamPatch.Scripts — that
+            // would reuse the replacement on the next lookup.
+            ip = (uint)ScriptArmStore.Pin(stem, scriptId, bytes);
             return ip == 0 ? 0 : 1;
         }
     }
@@ -661,11 +719,9 @@ public static class ModHost
             {
                 if (Config is null)
                 {
-                    log?.Invoke($"OnCallHook {hookId} on {stem}: no config, vanilla");
                     return 0;
                 }
 
-                log?.Invoke($"OnCallHook replace {hookId} on {stem} (assembling)");
                 try
                 {
                     ev.Row = HookAssembler.Assemble(stem, hookId, ev.Assembler ?? "", Config, log);

@@ -9,7 +9,7 @@ namespace Grandia.Sdk;
 public sealed class WorldMapDestination
 {
     public WorldMapDestination(MapId map, int aux = 0, int x = 0, int y = 0, bool revealed = true,
-        int slot = -1, IEnumerable<MapId>? variants = null, int picture = -1,
+        bool accessible = true, int slot = -1, IEnumerable<MapId>? variants = null, int picture = -1,
         string? picturePath = null, int pictureWidth = 0, int pictureHeight = 0)
     {
         Map = map;
@@ -17,6 +17,7 @@ public sealed class WorldMapDestination
         X = x;
         Y = y;
         Revealed = revealed;
+        Accessible = accessible;
         Slot = slot;
         Variants = variants?.ToList() ?? [];
         Picture = picture;
@@ -25,7 +26,7 @@ public sealed class WorldMapDestination
         PictureHeight = pictureHeight;
     }
 
-    /// <summary>Icon index 0..15, or -1 if this icon was added.</summary>
+    /// <summary>Icon index 0..31, or -1 if this icon was added.</summary>
     public int Slot { get; set; }
 
     /// <summary>Dest for the current origin context (where you opened the map).</summary>
@@ -44,6 +45,13 @@ public sealed class WorldMapDestination
     /// When false, the icon is hidden. Dest-table variants are left intact.
     /// </summary>
     public bool Revealed { get; set; }
+
+    /// <summary>
+    /// When true, the cursor can move here and the nameplate is in color
+    /// (stock “visited” bit). When false the pin stays visible if
+    /// <see cref="Revealed"/>, but grey, and D-pad / confirm skip it.
+    /// </summary>
+    public bool Accessible { get; set; }
 
     /// <summary>
     /// Other dest maps this icon can travel to (Lama South if <see cref="Map"/>

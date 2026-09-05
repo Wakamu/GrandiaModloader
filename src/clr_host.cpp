@@ -81,6 +81,7 @@ using OnTitleScreenFn = int(__cdecl*)();
 using OnCharacterFn = int(__cdecl*)(CharacterNative* req);
 using OnItemFn = int(__cdecl*)(ItemNative* req);
 using OnMagicFn = int(__cdecl*)(MagicNative* req);
+using OnDialogueFn = int(__cdecl*)(DialogueNative* req);
 using BindHostFn = int(__cdecl*)(HostApiNative* api);
 using GetMapFileFn = int(__cdecl*)(MapFileNative* req);
 
@@ -110,6 +111,7 @@ OnTitleScreenFn g_on_title_screen = nullptr;
 OnCharacterFn g_on_character = nullptr;
 OnItemFn g_on_item = nullptr;
 OnMagicFn g_on_magic = nullptr;
+OnDialogueFn g_on_dialogue = nullptr;
 BindHostFn g_bind_host = nullptr;
 GetMapFileFn g_get_map_file = nullptr;
 bool g_ready = false;
@@ -416,6 +418,7 @@ __declspec(noinline) bool LoadRuntime() {
     void* character_ptr = nullptr;
     void* item_ptr = nullptr;
     void* magic_ptr = nullptr;
+    void* dialogue_ptr = nullptr;
     void* bind_ptr = nullptr;
     void* map_file_ptr = nullptr;
     const int irc = load(assembly.c_str(), L"Grandia.Runtime.NativeEntry, Grandia.Runtime",
@@ -464,6 +467,8 @@ __declspec(noinline) bool LoadRuntime() {
                           L"OnItem", unmanaged_only, nullptr, &item_ptr);
     const int mgrc = load(assembly.c_str(), L"Grandia.Runtime.NativeEntry, Grandia.Runtime",
                           L"OnMagic", unmanaged_only, nullptr, &magic_ptr);
+    const int dlrc = load(assembly.c_str(), L"Grandia.Runtime.NativeEntry, Grandia.Runtime",
+                          L"OnDialogue", unmanaged_only, nullptr, &dialogue_ptr);
     const int brc = load(assembly.c_str(), L"Grandia.Runtime.NativeEntry, Grandia.Runtime",
                          L"BindHost", unmanaged_only, nullptr, &bind_ptr);
     const int mfrc = load(assembly.c_str(), L"Grandia.Runtime.NativeEntry, Grandia.Runtime",
@@ -471,13 +476,13 @@ __declspec(noinline) bool LoadRuntime() {
     if (irc != 0 || orc != 0 || prc != 0 || frc != 0 || arc != 0 || grc != 0 || wrc != 0 || src != 0 ||
         lrc != 0 || brc_battle != 0 || brc_setup != 0 || mrc != 0 || erc != 0 || shrc != 0 ||
         wlrc != 0 || scrc != 0 || hkrc != 0 || tvrc != 0 || tkrc != 0 || tsrc != 0 || chrc != 0 ||
-        itrc != 0 || mgrc != 0 || brc != 0 ||
+        itrc != 0 || mgrc != 0 || dlrc != 0 || brc != 0 ||
         mfrc != 0 ||
         !init_ptr ||
         !open_ptr || !patch_ptr || !flag_ptr || !assign_ptr || !gold_ptr || !wm_ptr || !save_ptr ||
         !load_ptr || !battle_ptr || !setup_ptr || !menu_ptr || !enemy_ptr || !shop_ptr ||
         !wm_load_ptr || !script_ptr || !hook_ptr || !travel_ptr || !tick_ptr || !title_ptr ||
-        !character_ptr || !item_ptr || !magic_ptr ||
+        !character_ptr || !item_ptr || !magic_ptr || !dialogue_ptr ||
         !bind_ptr ||
         !map_file_ptr) {
         LogWarn(
@@ -510,6 +515,7 @@ __declspec(noinline) bool LoadRuntime() {
     g_on_character = reinterpret_cast<OnCharacterFn>(character_ptr);
     g_on_item = reinterpret_cast<OnItemFn>(item_ptr);
     g_on_magic = reinterpret_cast<OnMagicFn>(magic_ptr);
+    g_on_dialogue = reinterpret_cast<OnDialogueFn>(dialogue_ptr);
     g_bind_host = reinterpret_cast<BindHostFn>(bind_ptr);
     g_get_map_file = reinterpret_cast<GetMapFileFn>(map_file_ptr);
 
@@ -540,6 +546,7 @@ __declspec(noinline) bool LoadRuntime() {
         g_on_character = nullptr;
         g_on_item = nullptr;
         g_on_magic = nullptr;
+        g_on_dialogue = nullptr;
         g_bind_host = nullptr;
         g_get_map_file = nullptr;
         return false;
@@ -595,6 +602,7 @@ void RemoveClrHost() {
     g_on_character = nullptr;
     g_on_item = nullptr;
     g_on_magic = nullptr;
+    g_on_dialogue = nullptr;
     g_bind_host = nullptr;
     g_get_map_file = nullptr;
     g_ctx = nullptr;
@@ -826,6 +834,13 @@ int RuntimeOnMagic(MagicNative* req) {
         return -1;
     }
     return g_on_magic(req);
+}
+
+int RuntimeOnDialogue(DialogueNative* req) {
+    if (!g_ready || !g_on_dialogue || !req) {
+        return -1;
+    }
+    return g_on_dialogue(req);
 }
 
 }  // namespace grandia_mod

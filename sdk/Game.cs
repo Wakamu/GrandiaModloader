@@ -1,7 +1,7 @@
 namespace Grandia.Sdk;
 
 /// <summary>
-/// Live game RAM: stash, gold, flags, party, turbo, encounters, and debug.
+/// Live game RAM: stash, gold, flags, party walk pos, turbo, encounters, and debug.
 /// Bound by GrandiaMod.dll after a save is in memory. Safe to call from
 /// hook methods (<see cref="OnTickAttribute"/>, <see cref="OnBattleLoadAttribute"/>, …).
 /// </summary>
@@ -146,4 +146,28 @@ public sealed class GameParty
     {
         SetIds();
     }
+
+    /// <summary>
+    /// Leader walk XYZ in table-1 <c>aabb=</c> units (actor 16.16 at +0x68/+0x6C/+0x70).
+    /// False off the field or before actors are live.
+    /// </summary>
+    public bool TryGetPosition(out WalkPos pos)
+    {
+        pos = default;
+        if (Game.Native?.PartyWalkGet(out var x, out var y, out var z) is not > 0)
+        {
+            return false;
+        }
+
+        pos = new WalkPos(x, y, z);
+        return true;
+    }
+
+    public WalkPos? GetPosition() => TryGetPosition(out var pos) ? pos : null;
+}
+
+/// <summary>Field walk coordinates; same space as zone <c>aabb=</c>.</summary>
+public readonly record struct WalkPos(int X, int Y, int Z)
+{
+    public override string ToString() => $"{X},{Y},{Z}";
 }

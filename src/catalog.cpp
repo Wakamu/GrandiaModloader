@@ -3,6 +3,7 @@
 #include "clr_host.h"
 #include "hook_util.h"
 #include "log.h"
+#include "party.h"
 
 #include <Windows.h>
 
@@ -15,11 +16,15 @@ extern "C" {
 void* g_mod_windt_fin1 = nullptr;
 void* g_mod_windt_fin2 = nullptr;
 void* g_mod_windt_fin3 = nullptr;
+void* g_mod_windt_fin_ret = nullptr;
 void ModWindtFinalize1();
 void ModWindtFinalize2();
 void ModWindtFinalize3();
+void ModWindtFinAfter();
+void ModWindtFinAfterShop();
 void ModOnWindtReadyItems();
 void ModOnWindtReadyMagic();
+void ModReapplyShopSessionPrices();
 }
 #endif
 
@@ -607,6 +612,9 @@ void WriteMagicRow(const MagicTable& t, int id, const MagicNative& req) {
             Write16(crec + 8, req.power);
             crec[12] = ClampU8(req.range);
             crec[14] = ClampU8(req.element_flags);
+            crec[18] = ClampU8(req.effect);
+            crec[19] = ClampU8(req.mode);
+            crec[17] = ClampU8(req.crit);
         }
     }
 }
@@ -632,9 +640,6 @@ void FireMagicCatalog() {
     if (!csrc) {
         return;
     }
-    unsigned n = 0;
-    int burn_cost = -1;
-    int burn_pwr = -1;
     for (int id = 1; id < static_cast<int>(kSkillIdCount); ++id) {
         auto* lrec = lsrc ? lsrc + static_cast<unsigned>(id) * kLearnStride : nullptr;
         auto* crec = CombatRec(csrc, id);
@@ -678,6 +683,9 @@ void FireMagicCatalog() {
         req.area = Read16(crec + 6);
         req.range = crec[12];
         req.element_flags = crec[14];
+        req.effect = crec[18];
+        req.mode = crec[19];
+        req.crit = crec[17];
         if (req.element == 0) {
             req.element = ElementFromFlags(req.element_flags);
         }
@@ -693,18 +701,8 @@ void FireMagicCatalog() {
         for (unsigned t = 0; t < ntab; ++t) {
             WriteMagicRow(tables[t], id, req);
         }
-        if (id == 12) {
-            auto* burn = CombatRec(tables[0].combat, 12);
-            if (burn && PtrReadable(burn, kCombatStride)) {
-                burn_cost = Read16(burn + 2);
-                burn_pwr = Read16(burn + 8);
-            }
-        }
-        ++n;
     }
     g_magic_fired.store(1, std::memory_order_release);
-    LogInfo("OnMagic catalog %u skill(s) (%u table(s)) burn +2=%d +8=%d", n, ntab, burn_cost,
-            burn_pwr);
 }
 
 void TryFireMagicPoll() {
@@ -754,6 +752,8 @@ void WriteItemRecord(std::uint8_t* rec, const ItemNative& req) {
     rec[16] = ClampU8(req.para2);
     rec[17] = ClampU8(req.para3);
     rec[18] = ClampU8(req.para4);
+    rec[9] = ClampU8(req.effect);
+    rec[10] = ClampU8(req.effect_value);
     Write16(rec + 19, req.para1_post);
     Write16(rec + 21, req.para2_post);
     Write16(rec + 23, req.para3_post);
@@ -768,7 +768,6 @@ void FireItemCatalog() {
         return;
     }
     ClearCatalogSell();
-    unsigned n = 0;
     for (int id = 1; id <= 511; ++id) {
         const auto off = static_cast<unsigned>(id - 1) * kWindtRecSize;
         auto* rec = secs[0] + off;
@@ -784,6 +783,8 @@ void FireItemCatalog() {
         req.cost = Read16(rec + 4);
         req.icon = rec[6];
         req.unknown7 = rec[7];
+        req.effect = rec[9];
+        req.effect_value = rec[10];
         req.para1_pre = rec[15];
         req.para2 = rec[16];
         req.para3 = rec[17];
@@ -803,10 +804,8 @@ void FireItemCatalog() {
                 WriteItemRecord(dest, req);
             }
         }
-        ++n;
     }
     g_items_fired.store(1, std::memory_order_release);
-    LogInfo("OnItem catalog %u item(s)", n);
 }
 
 void TryFireItemsPoll() {
@@ -936,7 +935,6 @@ bool RaiseAllCharacters() {
     if (!map_obj || !justin || !PtrReadable(justin, kCharStride)) {
         return false;
     }
-    unsigned n = 0;
     for (int id = 1; id <= static_cast<int>(kCharCount); ++id) {
         auto* blk = CharBlock(map_obj, id);
         if (!blk || !PtrReadable(blk, kCharStride)) {
@@ -948,10 +946,8 @@ bool RaiseAllCharacters() {
             continue;
         }
         WriteCharacter(map_obj, id, req);
-        ++n;
     }
     g_chars_fired.store(1, std::memory_order_release);
-    LogInfo("OnCharacter catalog %u char(s)", n);
     return true;
 }
 
@@ -1037,42 +1033,63 @@ extern "C" void ModOnWindtReadyMagic() {
     grandia_mod::NotifyWindtMagicReady();
 }
 
-extern "C" __declspec(naked) void ModWindtFinalize1() {
+// Replaces `call orig` at WINDT finalize (status / stash / shop +0x1E9467).
+// Must not `call orig` from here — that pushes an extra return and shifts
+// stack args (shop Buy cursor never appears). Steal the return, tail-jmp
+// orig, then run the after-hook and jump back.
+extern "C" __declspec(naked) void ModWindtFinAfter() {
     __asm {
-        pushad
-        call ModOnWindtReadyItems
-        popad
-        call dword ptr [g_mod_windt_fin1]
         pushad
         call ModOnWindtReadyMagic
         popad
-        ret
+        jmp dword ptr [g_mod_windt_fin_ret]
+    }
+}
+
+// Shop finalize recopies vanilla WINDT after OnShopOpen wrote session
+// buy-gold. Re-apply those overrides here only (not status/stash), then
+// fire OnItem from the vanilla table so catalog Cost/SellPrice stay global.
+extern "C" __declspec(naked) void ModWindtFinAfterShop() {
+    __asm {
+        pushad
+        call ModOnWindtReadyItems
+        call ModReapplyShopSessionPrices
+        call ModOnWindtReadyMagic
+        popad
+        jmp dword ptr [g_mod_windt_fin_ret]
+    }
+}
+
+extern "C" __declspec(naked) void ModWindtFinalize1() {
+    __asm {
+        mov eax, dword ptr [esp]
+        mov dword ptr [g_mod_windt_fin_ret], eax
+        mov dword ptr [esp], offset ModWindtFinAfter
+        pushad
+        call ModOnWindtReadyItems
+        popad
+        jmp dword ptr [g_mod_windt_fin1]
     }
 }
 
 extern "C" __declspec(naked) void ModWindtFinalize2() {
     __asm {
+        mov eax, dword ptr [esp]
+        mov dword ptr [g_mod_windt_fin_ret], eax
+        mov dword ptr [esp], offset ModWindtFinAfter
         pushad
         call ModOnWindtReadyItems
         popad
-        call dword ptr [g_mod_windt_fin2]
-        pushad
-        call ModOnWindtReadyMagic
-        popad
-        ret
+        jmp dword ptr [g_mod_windt_fin2]
     }
 }
 
 extern "C" __declspec(naked) void ModWindtFinalize3() {
     __asm {
-        pushad
-        call ModOnWindtReadyItems
-        popad
-        call dword ptr [g_mod_windt_fin3]
-        pushad
-        call ModOnWindtReadyMagic
-        popad
-        ret
+        mov eax, dword ptr [esp]
+        mov dword ptr [g_mod_windt_fin_ret], eax
+        mov dword ptr [esp], offset ModWindtFinAfterShop
+        jmp dword ptr [g_mod_windt_fin3]
     }
 }
 
@@ -1129,6 +1146,7 @@ void RemoveCatalogHooks() {
     g_mod_windt_fin1 = nullptr;
     g_mod_windt_fin2 = nullptr;
     g_mod_windt_fin3 = nullptr;
+    g_mod_windt_fin_ret = nullptr;
 #endif
 }
 

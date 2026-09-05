@@ -358,6 +358,52 @@ extern "C" int ModFlagSet(unsigned event_id, int value) {
     return 1;
 }
 
+extern "C" int ModPartyWalkGet(int* x, int* y, int* z) {
+    // Same walk XYZ +0x53320 uses for table-1 AABBs: actor =
+    // [0x71CD28] + input[0x71CD1C]+2 * 0xA0, 16.16 at +0x68/+0x6C/+0x70.
+    constexpr std::uintptr_t kInputPtrRva = 0x31CD1Cu;
+    constexpr std::uintptr_t kActorBaseRva = 0x31CD28u;
+    constexpr unsigned kActorStride = 0xA0u;
+    constexpr unsigned kPosX = 0x68u;
+    constexpr unsigned kMaxSlot = 15u;
+
+    if (!x || !y || !z) {
+        return 0;
+    }
+    *x = *y = *z = 0;
+    const auto base = ModuleBase();
+    if (base == 0) {
+        return 0;
+    }
+    void* input = nullptr;
+    void* actors = nullptr;
+    if (!SafeReadPointer(base + kInputPtrRva, &input) || !input ||
+        !SafeReadPointer(base + kActorBaseRva, &actors) || !actors) {
+        return 0;
+    }
+    std::uint8_t slot = 0;
+    if (!SafeReadByte(reinterpret_cast<std::uintptr_t>(input) + 2u, &slot) || slot > kMaxSlot) {
+        return 0;
+    }
+    const auto actor = reinterpret_cast<std::uintptr_t>(actors) +
+                       static_cast<std::uintptr_t>(slot) * kActorStride;
+
+    auto walk_axis = [](std::uintptr_t addr, int* out) -> bool {
+        std::uint32_t raw = 0;
+        if (!SafeReadU32(addr, &raw)) {
+            return false;
+        }
+        const auto rounded = static_cast<std::int32_t>(raw) + 0x8000;
+        *out = static_cast<int>(static_cast<std::int16_t>(rounded >> 16));
+        return true;
+    };
+    if (!walk_axis(actor + kPosX, x) || !walk_axis(actor + kPosX + 4u, y) ||
+        !walk_axis(actor + kPosX + 8u, z)) {
+        return 0;
+    }
+    return 1;
+}
+
 void FillHostApi(HostApiNative* api) {
     if (!api) {
         return;
@@ -387,6 +433,7 @@ void FillHostApi(HostApiNative* api) {
     api->overlay_set_panel = &ModOverlaySetPanel;
     api->overlay_clear_panel = &ModOverlayClearPanel;
     api->overlay_panel_active = &ModOverlayPanelActive;
+    api->party_walk_get = &ModPartyWalkGet;
 }
 
 bool InstallGameServices() {

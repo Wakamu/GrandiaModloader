@@ -33,19 +33,21 @@ public sealed class LaunchService
             var cfg = _store.Config;
             cfg.FillDefaults();
 
-            var dll = Paths.ResolveDllPath();
             var tools = Paths.ResolveFieldTools();
             Log?.Invoke($"field_tools {tools}");
             var overlay = Paths.OverlayDir;
             Directory.CreateDirectory(overlay);
-            StageRuntime(dll);
-            WriteModsJson(cfg, dll, overlay, tools);
+
+            // Stage the DLL + runtime + mods.json into a writable folder so
+            // we never need to write into Program Files.
+            var dll = StageToWritableDir(cfg, overlay, tools);
+            Log?.Invoke($"Staged runtime to {Path.GetDirectoryName(dll)}");
 
             var existing = DllInjector.FindProcessId("grandia.exe");
             if (existing is int runningPid)
             {
                 Log?.Invoke("grandia.exe is already running. C# mods already in that process will not reload — quit the game and Launch again.");
-                InjectIfNeeded(runningPid, dll);
+                //InjectIfNeeded(runningPid, dll);
                 return;
             }
 
@@ -53,7 +55,6 @@ public sealed class LaunchService
             var pid = await DllInjector.WaitForProcessAsync("grandia.exe", token, pollMs: 750, log: msg => Log?.Invoke(msg))
                 .ConfigureAwait(false);
             InjectIfNeeded(pid, dll);
-            Log?.Invoke("Mods are live. OnMapLoad assembles on fopen; patches apply after map bind.");
         }
         finally
         {
@@ -62,50 +63,67 @@ public sealed class LaunchService
         }
     }
 
-    private void StageRuntime(string dllPath)
+    /// <summary>
+    /// Copies GrandiaMod.dll + the CLR runtime into a writable staging folder
+    /// (%AppData%\GrandiaModloader\runtime\), writes mods.json there, and returns
+    /// the full path to the staged GrandiaMod.dll ready for injection.
+    /// </summary>
+    private string StageToWritableDir(AppConfig cfg, string overlay, string tools)
     {
-        var dest = Path.GetDirectoryName(dllPath);
-        if (string.IsNullOrEmpty(dest))
-        {
-            return;
-        }
+        var stageDir = Path.Combine(Paths.UserDataRoot, "runtime");
+        Directory.CreateDirectory(stageDir);
 
-        foreach (var cfg in new[] { "Release", "Debug" })
+        // --- GrandiaMod.dll ---
+        var srcDll = Paths.ResolveDllPath();
+        var stagedDll = Path.Combine(stageDir, "GrandiaMod.dll");
+        CopyIfNewer(srcDll, stagedDll);
+
+        // --- CLR runtime files (from AppDir when installed, or from build tree in dev) ---
+        var runtimeFiles = new[]
         {
-            var src = Path.Combine(Paths.RepoRoot, "runtime", "bin", cfg, "net8.0");
-            if (!Directory.Exists(src))
+            "Grandia.Runtime.dll",
+            "Grandia.Runtime.runtimeconfig.json",
+            "Grandia.Runtime.deps.json",
+            "Grandia.Sdk.dll",
+        };
+
+        bool stagedFromBuild = false;
+        foreach (var config in new[] { "Release", "Debug" })
+        {
+            var buildSrc = Path.Combine(Paths.RepoRoot, "runtime", "bin", config, "net8.0");
+            if (!Directory.Exists(buildSrc))
             {
                 continue;
             }
 
-            foreach (var name in new[]
-                     {
-                         "Grandia.Runtime.dll", "Grandia.Runtime.runtimeconfig.json", "Grandia.Runtime.deps.json",
-                         "Grandia.Sdk.dll",
-                     })
+            foreach (var name in runtimeFiles)
             {
-                var file = Path.Combine(src, name);
+                var file = Path.Combine(buildSrc, name);
                 if (File.Exists(file))
                 {
-                    File.Copy(file, Path.Combine(dest, name), overwrite: true);
+                    CopyIfNewer(file, Path.Combine(stageDir, name));
                 }
             }
 
-            Log?.Invoke($"Staged CLR runtime from {src}");
-            return;
+            Log?.Invoke($"Staged CLR runtime from {buildSrc}");
+            stagedFromBuild = true;
+            break;
         }
 
-        Log?.Invoke("Grandia.Runtime not built yet — cmake/dotnet build runtime, or Launch will fail CLR init.");
-    }
-
-    private void WriteModsJson(AppConfig cfg, string dllPath, string overlay, string tools)
-    {
-        var dest = Path.GetDirectoryName(dllPath);
-        if (string.IsNullOrEmpty(dest))
+        if (!stagedFromBuild)
         {
-            throw new InvalidOperationException("GrandiaMod.dll path has no directory.");
+            // Installed: runtime files sit next to the exe in AppDir.
+            foreach (var name in runtimeFiles)
+            {
+                var file = Path.Combine(Paths.AppDir, name);
+                if (File.Exists(file))
+                {
+                    CopyIfNewer(file, Path.Combine(stageDir, name));
+                }
+            }
         }
 
+        // --- mods.json ---
         var install = cfg.InstallDir;
         if (string.IsNullOrWhiteSpace(install) || !File.Exists(Path.Combine(install, "grandia.exe")))
         {
@@ -142,9 +160,25 @@ public sealed class LaunchService
             mods,
         };
 
-        var jsonPath = Path.Combine(dest, "mods.json");
+        var jsonPath = Path.Combine(stageDir, "mods.json");
         File.WriteAllText(jsonPath, JsonSerializer.Serialize(payload, AppConfig.JsonOptions()));
         Log?.Invoke($"Wrote {jsonPath}");
+
+        return stagedDll;
+    }
+
+    private static void CopyIfNewer(string src, string dest)
+    {
+        if (!File.Exists(src))
+        {
+            return;
+        }
+
+        if (!File.Exists(dest) ||
+            File.GetLastWriteTimeUtc(src) > File.GetLastWriteTimeUtc(dest))
+        {
+            File.Copy(src, dest, overwrite: true);
+        }
     }
 
     private void StartGame(AppConfig cfg)

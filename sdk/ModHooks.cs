@@ -103,6 +103,7 @@ public sealed class ModHooks
         AddDelegate<CharacterEvent>(mod, mod.OnCharacter);
         AddDelegate<ItemEvent>(mod, mod.OnItem);
         AddDelegate<MagicEvent>(mod, mod.OnMagic);
+        AddDelegate<DialogueEvent>(mod, mod.OnDialogue);
     }
 
     private void AddMethod(object target, MethodInfo method, Type eventType, string attrName)

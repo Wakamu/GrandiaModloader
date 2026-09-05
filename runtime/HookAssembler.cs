@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using Grandia.Sdk;
 
 namespace Grandia.Runtime;
 
@@ -24,7 +25,13 @@ internal static class HookAssembler
             }
         }
 
-        var bytes = RunEmit(stem, hookId, asm, cfg);
+        _ = cfg;
+        var bytes = FieldHookAsm.AssembleHook(asm, hookId);
+        if (bytes.Length != FieldHookAsm.HookRowSize)
+        {
+            throw new InvalidOperationException($"FieldHookAsm produced {bytes.Length} bytes, want 20.");
+        }
+
         lock (Cache)
         {
             Cache[key] = bytes;
@@ -38,26 +45,5 @@ internal static class HookAssembler
     {
         var raw = Encoding.UTF8.GetBytes($"{stem}\n{hookId:X4}\n{asm}");
         return Convert.ToHexString(SHA256.HashData(raw));
-    }
-
-    private static byte[] RunEmit(string stem, int hookId, string asm, ModsConfig cfg)
-    {
-        var cache = string.IsNullOrWhiteSpace(cfg.Cache)
-            ? Path.Combine(Path.GetTempPath(), "GrandiaMod")
-            : cfg.Cache;
-        var dir = Path.Combine(cache, "_asm");
-        Directory.CreateDirectory(dir);
-        var src = Path.Combine(dir, $"{stem}_hook_{hookId:X4}.asm");
-        var dest = Path.Combine(dir, $"{stem}_hook_{hookId:X4}.bin");
-        File.WriteAllText(src, asm, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
-
-        FieldTools.Run(cfg, $"hook --emit {FieldTools.Quote(src)} -o {FieldTools.Quote(dest)}", "field_tools hook");
-        var bytes = File.Exists(dest) ? File.ReadAllBytes(dest) : [];
-        if (bytes.Length != 20)
-        {
-            throw new InvalidOperationException($"field_hook_asm --emit produced {bytes.Length} bytes, want 20.");
-        }
-
-        return bytes;
     }
 }

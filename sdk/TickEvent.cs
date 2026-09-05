@@ -16,8 +16,9 @@ public sealed class TickEvent
     public PadState Pad { get; }
 
     /// <summary>
-    /// Clear the game's pad object after this tick (held/trig at
-    /// <c>+0x319440</c>). <see cref="Pad"/> is still the real XInput state.
+    /// Swallow this pad update so field, menus, and the title New Game /
+    /// Continue / Options cursor do not see it. <see cref="Pad"/> is still the
+    /// real XInput state.
     /// </summary>
     public bool BlockGameInput { get; set; }
 

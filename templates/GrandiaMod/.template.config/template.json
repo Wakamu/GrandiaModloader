@@ -1,0 +1,41 @@
+{
+  "$schema": "http://json.schemastore.org/template",
+  "author": "Grandia Modloader",
+  "classifications": [ "Grandia", "Mod", "Library" ],
+  "identity": "Grandia.Mod.CSharp",
+  "groupIdentity": "Grandia.Mod",
+  "name": "Grandia Mod",
+  "description": "C# class library that references Grandia.Sdk from the installed modloader.",
+  "shortName": "grandiamod",
+  "sourceName": "GrandiaMod1",
+  "preferNameDirectory": true,
+  "tags": {
+    "language": "C#",
+    "type": "project"
+  },
+  "symbols": {
+    "Framework": {
+      "type": "parameter",
+      "description": "The target framework for the project.",
+      "datatype": "choice",
+      "choices": [
+        { "choice": "net8.0", "description": ".NET 8 (matches Grandia.Sdk)" }
+      ],
+      "defaultValue": "net8.0",
+      "replaces": "net8.0"
+    }
+  },
+  "primaryOutputs": [
+    { "path": "GrandiaMod1.csproj" },
+    { "path": "Plugin.cs" }
+  ],
+  "sources": [
+    {
+      "modifiers": [
+        {
+          "exclude": [ "GrandiaMod.vstemplate", "__TemplateIcon.ico" ]
+        }
+      ]
+    }
+  ]
+}

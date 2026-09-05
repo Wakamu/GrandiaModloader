@@ -1,16 +1,18 @@
-using System.Text.Json;
 using Grandia.Sdk;
 
 namespace Grandia.Runtime;
 
 internal static class ScriptHydrator
 {
+    private static readonly Dictionary<string, List<(int Id, byte[] Bytes)>> Cache =
+        new(StringComparer.OrdinalIgnoreCase);
+
     public static void Hydrate(Map map, ModsConfig cfg, string cacheDir, Action<string>? log)
     {
         try
         {
-            var scripts = Load(map.Stem, cfg, cacheDir);
-            map.HydrateScripts(scripts);
+            var scripts = Load(map.Stem, cfg);
+            map.AttachBytecode(scripts, map.Stem);
             log?.Invoke($"hydrated {scripts.Count} script(s) on {map.Stem}");
         }
         catch (Exception ex)
@@ -19,72 +21,40 @@ internal static class ScriptHydrator
         }
     }
 
-    private static List<(int Id, string Text)> Load(string stem, ModsConfig cfg, string cacheDir)
+    public static bool TryGet(string stem, int scriptId, ModsConfig? cfg, out byte[] bytes)
     {
-        // Always dump vanilla FIELD/TEXT. Overlay files are emit output; using
-        // them as input changes the stamp after every emit and re-spawns field_tools.
-        var textRoot = cfg.Text;
-        var fieldRoot = cfg.Field;
-        var dump = Path.Combine(cacheDir, "_ir", stem + ".scripts.json");
-        var stamp = DumpStamp(textRoot, fieldRoot, stem);
-        if (File.Exists(dump) && File.Exists(dump + ".stamp") &&
-            File.ReadAllText(dump + ".stamp") == stamp)
+        bytes = [];
+        if (cfg is null || string.IsNullOrWhiteSpace(stem))
         {
-            return ReadDump(dump);
+            return false;
         }
 
-        RunDump(stem, dump, cfg, fieldRoot, textRoot);
-        Directory.CreateDirectory(Path.GetDirectoryName(dump)!);
-        File.WriteAllText(dump + ".stamp", stamp);
-        return ReadDump(dump);
-    }
-
-    private static string DumpStamp(string textRoot, string fieldRoot, string stem)
-    {
-        var scn = FirstExisting(textRoot, stem + ".SCN", stem + ".scn");
-        var ofs = FirstExisting(textRoot, stem + ".OFS", stem + ".ofs");
-        var mdp = FirstExisting(fieldRoot, stem + ".mdp", stem + ".MDP");
-        static string Tick(string? path) =>
-            path is null ? "0" : File.GetLastWriteTimeUtc(path).Ticks.ToString();
-        return $"{scn}|{Tick(scn)}|{ofs}|{Tick(ofs)}|{mdp}|{Tick(mdp)}";
-    }
-
-    private static string? FirstExisting(string root, params string[] names)
-    {
-        if (string.IsNullOrWhiteSpace(root))
+        foreach (var (id, blob) in Load(stem, cfg))
         {
-            return null;
-        }
-
-        foreach (var name in names)
-        {
-            var p = Path.Combine(root, name);
-            if (File.Exists(p))
+            if (id == scriptId)
             {
-                return p;
+                bytes = blob;
+                return blob.Length > 0;
             }
         }
 
-        return null;
+        return false;
     }
 
-    private static void RunDump(string stem, string dump, ModsConfig cfg, string field, string text)
+    private static List<(int Id, byte[] Bytes)> Load(string stem, ModsConfig cfg)
     {
-        Directory.CreateDirectory(Path.GetDirectoryName(dump)!);
-        FieldTools.Run(cfg,
-            $"script {stem} --dump {FieldTools.Quote(dump)} --field {FieldTools.Quote(field)} --text {FieldTools.Quote(text)}",
-            "field_tools dump");
-    }
-
-    private static List<(int Id, string Text)> ReadDump(string dump)
-    {
-        using var doc = JsonDocument.Parse(File.ReadAllText(dump));
-        var list = new List<(int, string)>();
-        foreach (var el in doc.RootElement.EnumerateArray())
+        lock (Cache)
         {
-            var id = el.GetProperty("id").GetInt32();
-            var text = el.GetProperty("text").GetString() ?? "";
-            list.Add((id, text));
+            if (Cache.TryGetValue(stem, out var hit))
+            {
+                return hit;
+            }
+        }
+
+        var list = FieldScriptBank.LoadAll(cfg.Text, stem);
+        lock (Cache)
+        {
+            Cache[stem] = list;
         }
 
         return list;

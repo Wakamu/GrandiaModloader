@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <PlatformTarget>x86</PlatformTarget>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <GrandiaModloaderDir Condition="'$(GrandiaModloaderDir)' == ''">$(GRANDIA_MODLOADER)</GrandiaModloaderDir>
+    <GrandiaModloaderDir Condition="'$(GrandiaModloaderDir)' == ''">$([MSBuild]::GetRegistryValueFromView('HKEY_LOCAL_MACHINE\SOFTWARE\GrandiaModloader', 'InstallDir', null, RegistryView.Registry32, RegistryView.Registry64))</GrandiaModloaderDir>
+    <GrandiaModloaderDir Condition="'$(GrandiaModloaderDir)' == '' and Exists('C:\Program Files (x86)\Grandia Modloader\Grandia.Sdk.dll')">C:\Program Files (x86)\Grandia Modloader</GrandiaModloaderDir>
+    <GrandiaModloaderDir Condition="'$(GrandiaModloaderDir)' == '' and Exists('C:\Program Files\Grandia Modloader\Grandia.Sdk.dll')">C:\Program Files\Grandia Modloader</GrandiaModloaderDir>
+  </PropertyGroup>
+  <Import Project="$(GrandiaModloaderDir)\Grandia.Mod.targets" Condition="'$(GrandiaModloaderDir)' != '' and Exists('$(GrandiaModloaderDir)\Grandia.Mod.targets')" />
+  <ItemGroup>
+    <Reference Include="Grandia.Sdk">
+      <HintPath>$(GrandiaModloaderDir)\Grandia.Sdk.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+</Project>

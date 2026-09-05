@@ -22,8 +22,18 @@ extern "C" int ModFlagSet(unsigned event_id, int value);
 #if defined(_M_IX86)
 extern "C" {
 void* g_mod_orig_pad_refresh = nullptr;
+void* g_pad_fill_entry_fn = nullptr;
+void* g_last_pad_dest = nullptr;
+void* g_title_menu_tramp = nullptr;
+void* g_title_menu_skip = nullptr;
+int g_pad_fill_blocked = 0;
 void ModAfterPadRefresh();
 void ModPadFillDetour();
+void ModTitlePadCallDetour();
+void ModTitleMenuGateDetour();
+void ModBlankLastPadDest();
+void ModSwallowBlockedGamePad();
+int ModPadFillIsBlocked();
 }
 #endif
 
@@ -41,7 +51,16 @@ constexpr unsigned kDebugFlagOn = 0x30303034u;
 constexpr DWORD kMaxScaledSleepMs = 50;
 constexpr std::uintptr_t kPadFillFnRva = 0x58F0u;
 constexpr std::size_t kPadFillStolen = 12;
+// One 18-byte pad slot: +0 held, +4 edge, +6 repeat, +8 prev. Title New
+// Game / Continue / Options reads +0x31CEC0 (+4 confirm, +6 d-pad).
 constexpr std::uintptr_t kPadObjRva = 0x319440u;
+constexpr std::uintptr_t kTitlePadRva = 0x31CEC0u;
+constexpr std::uintptr_t kMenuPadRva = 0x31CE80u;
+constexpr std::uintptr_t kTitlePadCallRvas[] = {0x793Fu, 0x8FC4u};
+constexpr std::uintptr_t kTitleMenuInputRva = 0x7C34u;
+constexpr std::size_t kTitleMenuInputStolen = 6;
+constexpr std::uintptr_t kTitleMenuSkipRva = 0x7DBCu;
+constexpr std::size_t kPadObjBytes = 0x18;
 
 using QueryPerformanceCounter_t = BOOL(WINAPI*)(LARGE_INTEGER*);
 using GetTickCount_t = DWORD(WINAPI*)();
@@ -95,6 +114,11 @@ std::atomic<DWORD> g_last_pad_raise_ms{0};
 void* g_pad_site = nullptr;
 void* g_pad_tramp_mem = nullptr;
 std::uint8_t g_pad_original[16]{};
+void* g_title_pad_call_site[2]{};
+std::uint8_t g_title_pad_call_orig[2][8]{};
+void* g_title_menu_site = nullptr;
+void* g_title_menu_tramp_mem = nullptr;
+std::uint8_t g_title_menu_original[8]{};
 
 int ClampSpeedLevel(int level) {
     if (level <= 0) {
@@ -464,16 +488,53 @@ void ResolveXInput() {
     }
 }
 
+void BlankPadObject(std::uintptr_t at) {
+    if (at == 0) {
+        return;
+    }
+    DWORD old_protect = 0;
+    if (!VirtualProtect(reinterpret_cast<void*>(at), kPadObjBytes, PAGE_READWRITE, &old_protect)) {
+        for (std::size_t i = 0; i < kPadObjBytes; i += 4) {
+            SafeWriteU32(at + i, 0);
+        }
+        return;
+    }
+    __try {
+        std::memset(reinterpret_cast<void*>(at), 0, kPadObjBytes);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    VirtualProtect(reinterpret_cast<void*>(at), kPadObjBytes, old_protect, &old_protect);
+}
+
+bool PadDestInImage(std::uintptr_t at) {
+    const auto base = ModuleBase();
+    return base != 0 && at >= base && at + kPadObjBytes <= base + 0x400000u;
+}
+
 void BlankGamePad() {
     const auto base = ModuleBase();
     if (base == 0) {
         return;
     }
-    const auto at = base + kPadObjRva;
-    SafeWriteU32(at, 0);
-    SafeWriteU32(at + 4, 0);
-    SafeWriteU32(at + 8, 0);
-    SafeWriteU32(at + 12, 0);
+    BlankPadObject(base + kPadObjRva);
+    BlankPadObject(base + kTitlePadRva);
+    BlankPadObject(base + kMenuPadRva);
+#if defined(_M_IX86)
+    const auto dest = reinterpret_cast<std::uintptr_t>(g_last_pad_dest);
+    if (PadDestInImage(dest)) {
+        BlankPadObject(dest);
+    }
+#endif
+}
+
+void SetBlockGamePad(bool block) {
+    g_block_game_pad.store(block, std::memory_order_relaxed);
+#if defined(_M_IX86)
+    g_pad_fill_blocked = block ? 1 : 0;
+#endif
+    if (block) {
+        BlankGamePad();
+    }
 }
 
 bool WriteCall(void* site, void* destination, std::uint8_t* original_out) {
@@ -501,38 +562,81 @@ bool InstallPadBlockHook() {
 #if !defined(_M_IX86)
     return false;
 #else
-    if (g_pad_site) {
+    if (g_pad_site || g_title_pad_call_site[0] || g_title_menu_site) {
         return true;
     }
     const auto base = ModuleBase();
     if (base == 0) {
         return false;
     }
+    bool any = false;
+    g_pad_fill_entry_fn = reinterpret_cast<void*>(base + kPadFillFnRva);
     auto* site = reinterpret_cast<std::uint8_t*>(base + kPadFillFnRva);
     // push ebp; mov ebp, esp; push ecx; movss xmm3, [imm32]
     const std::uint8_t expect[] = {0x55, 0x8B, 0xEC, 0x51, 0xF3, 0x0F, 0x10, 0x1D};
     if (!IsExecutableAddress(site) || !BytesMatch(site, expect, sizeof(expect)) ||
         site[12] != 0x8B || site[13] != 0xD1) {
         LogWarn("OnTick pad-fill +0x58F0 mismatch");
-        return false;
+    } else {
+        g_pad_tramp_mem = MakeTrampoline(site, kPadFillStolen, site + kPadFillStolen);
+        if (!g_pad_tramp_mem) {
+            LogWarn("OnTick pad-fill trampoline alloc failed");
+        } else {
+            g_mod_orig_pad_refresh = g_pad_tramp_mem;
+            if (!WriteJump(site, reinterpret_cast<void*>(&ModPadFillDetour), g_pad_original,
+                           kPadFillStolen)) {
+                VirtualFree(g_pad_tramp_mem, 0, MEM_RELEASE);
+                g_pad_tramp_mem = nullptr;
+                g_mod_orig_pad_refresh = nullptr;
+                LogWarn("OnTick pad-fill hook failed");
+            } else {
+                g_pad_site = site;
+                any = true;
+                LogInfo("OnTick pad-fill hook at +0x58F0 (BlockGameInput, save/UI)");
+            }
+        }
     }
-    g_pad_tramp_mem = MakeTrampoline(site, kPadFillStolen, site + kPadFillStolen);
-    if (!g_pad_tramp_mem) {
-        LogWarn("OnTick pad-fill trampoline alloc failed");
-        return false;
+
+    for (std::size_t i = 0; i < 2; ++i) {
+        auto* call = reinterpret_cast<std::uint8_t*>(base + kTitlePadCallRvas[i]);
+        if (!IsExecutableAddress(call) ||
+            !WriteCall(call, reinterpret_cast<void*>(&ModTitlePadCallDetour),
+                       g_title_pad_call_orig[i])) {
+            LogWarn("Title pad-fill call +0x%X hook failed",
+                    static_cast<unsigned>(kTitlePadCallRvas[i]));
+            continue;
+        }
+        g_title_pad_call_site[i] = call;
+        any = true;
+        LogInfo("Title pad-fill call hook at +0x%X", static_cast<unsigned>(kTitlePadCallRvas[i]));
     }
-    g_mod_orig_pad_refresh = g_pad_tramp_mem;
-    if (!WriteJump(site, reinterpret_cast<void*>(&ModPadFillDetour), g_pad_original,
-                   kPadFillStolen)) {
-        VirtualFree(g_pad_tramp_mem, 0, MEM_RELEASE);
-        g_pad_tramp_mem = nullptr;
-        g_mod_orig_pad_refresh = nullptr;
-        LogWarn("OnTick pad-fill hook failed");
-        return false;
+
+    auto* menu = reinterpret_cast<std::uint8_t*>(base + kTitleMenuInputRva);
+    const std::uint8_t menu_expect[] = {0x8B, 0x0D};
+    if (!IsExecutableAddress(menu) || !BytesMatch(menu, menu_expect, sizeof(menu_expect))) {
+        LogWarn("Title menu input +0x7C34 mismatch");
+    } else {
+        g_title_menu_tramp_mem = MakeTrampoline(menu, kTitleMenuInputStolen, menu + kTitleMenuInputStolen);
+        if (!g_title_menu_tramp_mem) {
+            LogWarn("Title menu input trampoline alloc failed");
+        } else {
+            g_title_menu_tramp = g_title_menu_tramp_mem;
+            g_title_menu_skip = reinterpret_cast<void*>(base + kTitleMenuSkipRva);
+            if (!WriteJump(menu, reinterpret_cast<void*>(&ModTitleMenuGateDetour),
+                           g_title_menu_original, kTitleMenuInputStolen)) {
+                VirtualFree(g_title_menu_tramp_mem, 0, MEM_RELEASE);
+                g_title_menu_tramp_mem = nullptr;
+                g_title_menu_tramp = nullptr;
+                g_title_menu_skip = nullptr;
+                LogWarn("Title menu input +0x7C34 hook failed");
+            } else {
+                g_title_menu_site = menu;
+                any = true;
+                LogInfo("Title menu input gate at +0x7C34 (BlockGameInput)");
+            }
+        }
     }
-    g_pad_site = site;
-    LogInfo("OnTick pad-fill hook at +0x58F0 (BlockGameInput, save/UI)");
-    return true;
+    return any;
 #endif
 }
 
@@ -543,10 +647,30 @@ void RemovePadBlockHook() {
     }
 #if defined(_M_IX86)
     g_mod_orig_pad_refresh = nullptr;
+    g_pad_fill_entry_fn = nullptr;
+    g_last_pad_dest = nullptr;
 #endif
     if (g_pad_tramp_mem) {
         VirtualFree(g_pad_tramp_mem, 0, MEM_RELEASE);
         g_pad_tramp_mem = nullptr;
+    }
+    for (std::size_t i = 0; i < 2; ++i) {
+        if (g_title_pad_call_site[i]) {
+            RestoreBytes(g_title_pad_call_site[i], g_title_pad_call_orig[i], 5);
+            g_title_pad_call_site[i] = nullptr;
+        }
+    }
+    if (g_title_menu_site) {
+        RestoreBytes(g_title_menu_site, g_title_menu_original, kTitleMenuInputStolen);
+        g_title_menu_site = nullptr;
+    }
+#if defined(_M_IX86)
+    g_title_menu_tramp = nullptr;
+    g_title_menu_skip = nullptr;
+#endif
+    if (g_title_menu_tramp_mem) {
+        VirtualFree(g_title_menu_tramp_mem, 0, MEM_RELEASE);
+        g_title_menu_tramp_mem = nullptr;
     }
 }
 
@@ -767,11 +891,7 @@ void RaiseTick() {
     req.right_trigger = static_cast<std::uint8_t>((packed >> 24) & 0xFFu);
     req.block = 0;
     RuntimeOnTick(&req);
-    const bool block = req.block != 0;
-    g_block_game_pad.store(block, std::memory_order_relaxed);
-    if (block) {
-        BlankGamePad();
-    }
+    SetBlockGamePad(req.block != 0);
 }
 
 void OnPadRefreshed() {
@@ -838,13 +958,61 @@ extern "C" void ModAfterPadRefresh() {
     grandia_mod::OnPadRefreshed();
 }
 
+extern "C" void ModSwallowBlockedGamePad() {
+    grandia_mod::SwallowBlockedGamePad();
+}
+
+extern "C" int ModPadFillIsBlocked() {
+    return g_pad_fill_blocked;
+}
+
+extern "C" void ModBlankLastPadDest() {
+    const auto at = reinterpret_cast<std::uintptr_t>(g_last_pad_dest);
+    if (at == 0) {
+        return;
+    }
+    grandia_mod::SwallowBlockedGamePad();
+}
+
 extern "C" __declspec(naked) void ModPadFillDetour() {
     __asm {
+        mov dword ptr [g_last_pad_dest], ecx
+        cmp dword ptr [g_pad_fill_blocked], 0
+        jne skip_fill
         call dword ptr [g_mod_orig_pad_refresh]
+        jmp after_fill
+    skip_fill:
+        pushad
+        call ModBlankLastPadDest
+        popad
+    after_fill:
         pushad
         call ModAfterPadRefresh
         popad
         ret
+    }
+}
+
+extern "C" __declspec(naked) void ModTitlePadCallDetour() {
+    __asm {
+        call dword ptr [g_pad_fill_entry_fn]
+        pushad
+        call ModSwallowBlockedGamePad
+        popad
+        ret
+    }
+}
+
+extern "C" __declspec(naked) void ModTitleMenuGateDetour() {
+    __asm {
+        pushad
+        call ModPadFillIsBlocked
+        test eax, eax
+        popad
+        jne skip_menu
+        jmp dword ptr [g_title_menu_tramp]
+    skip_menu:
+        jmp dword ptr [g_title_menu_skip]
     }
 }
 #endif

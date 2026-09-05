@@ -29,6 +29,7 @@ from field_script_hooks import (
     build_cutscene_row,
     build_hook_fanout_row,
     build_present_channel_row,
+    build_scripted_battle_row,
     build_setup_row,
     build_sys_latch_row,
     build_typed_row,
@@ -509,6 +510,57 @@ def _try_pretty(raw: bytes) -> str | None:
             parts.append(f"delay={delay}")
         if follow:
             parts.append(f"follow={follow}")
+    elif kind == "scripted_battle":
+        flags = int(decoded.get("rowFlags") or 0)
+        table = int(decoded.get("encounterTable") or 0)
+        word = int(decoded.get("word") or 0)
+        pair_offs = (8, 9, 0xA, 0xB, 0xF, 0x10, 0x11, 0x12)
+        packed: list[tuple[int, int]] = []
+        last = -1
+        for i, off in enumerate(pair_offs):
+            b = raw[off]
+            packed.append((b >> 4, b & 0xF))
+            if b:
+                last = i
+        pairs = packed[: last + 1]
+        rebuilt = bytearray(build_scripted_battle_row(
+            hid, table, pairs, word=word, row_flags=flags, flags1=flags1,
+        ))
+        rebuilt[2] = raw[2]
+        rebuilt[0xC] = raw[0xC]
+        rebuilt[0xD] = raw[0xD]
+        rebuilt[0xE] = raw[0xE]
+        rebuilt = bytes(rebuilt)
+        parts += ["scripted_battle", f"table=0x{table:02X}"]
+        parts.extend(f"{idx}x{cnt}" for idx, cnt in pairs)
+        if word:
+            parts.append(f"word=0x{word:X}")
+        if flags != 0x40:
+            parts.append(f"flags=0x{flags:02X}")
+        mode = raw[2] & 7
+        f1 = raw[0xC] | ((raw[0xD] & 0xF) << 8)
+        f2 = (raw[0xD] >> 4) | (raw[0xE] << 4)
+        pol = (raw[2] >> 3) & 1
+        if mode == 1 and f1 and not f2:
+            parts.append(f"{'if_set' if pol else 'if_clear'}=0x{f1:X}")
+        elif mode == 5 and f1 and pol:
+            parts.append(f"if_set=0x{f1:X}")
+            parts.append(f"if_clear=0x{f2:X}")
+        elif mode == 5 and f1:
+            parts.append(f"gate=5 a=0x{f1:X} b=0x{f2:X}")
+        elif mode:
+            parts.append(f"gate={mode}")
+            if f1:
+                parts.append(f"a=0x{f1:X}")
+            if f2:
+                parts.append(f"b=0x{f2:X}")
+        else:
+            if f1:
+                parts.append(f"a=0x{f1:X}")
+            if f2:
+                parts.append(f"b=0x{f2:X}")
+        if raw[2]:
+            parts.append(f"trig=0x{raw[2]:02X}")
     else:
         return _layout_pretty(raw, decoded)
 
@@ -989,6 +1041,14 @@ def _parse_layout(hid: int, kind: str, args: list[str], kv: dict[str, str], *, f
     return build_typed_row(hid, handler, fields, flags1=flags1)
 
 
+def _parse_battle_pair(token: str) -> tuple[int, int]:
+    low = token.lower()
+    x = low.find("x")
+    if x <= 0 or x >= len(token) - 1:
+        raise AsmError(f"scripted_battle pair {token!r} wants NxC")
+    return parse_int(token[:x]), parse_int(token[x + 1 :])
+
+
 def _parse_hook_line(tokens: list[str]) -> bytes:
     if len(tokens) < 2:
         raise AsmError("hook line needs an id")
@@ -1102,6 +1162,25 @@ def _parse_hook_line(tokens: list[str]) -> bytes:
             delay_ticks=delay, follow_hook_id=follow,
             flags1=flags1,
         )
+    if kind in ("scripted_battle", "type_19"):
+        table = parse_int(kv["table"]) if "table" in kv else None
+        rest = list(args)
+        pairs: list[tuple[int, int]] = []
+        if table is None and rest and "x" not in rest[0].lower():
+            table = parse_int(rest.pop(0))
+        if table is None:
+            raise AsmError("scripted_battle needs table=")
+        for arg in rest:
+            pairs.append(_parse_battle_pair(arg))
+        word = parse_int(kv["word"]) if "word" in kv else 0
+        row = bytearray(build_scripted_battle_row(
+            hid, table, pairs, word=word,
+            row_flags=0x40 if flags is None else flags,
+            flags1=flags1,
+        ))
+        if "trig" in kv:
+            row[2] = _u8(parse_int(kv["trig"]))
+        return bytes(row)
     if kind in _LAYOUT_HANDLERS:
         return _parse_layout(hid, kind, args, kv, flags=flags, delay=delay, follow=follow, flags1=flags1)
     raise AsmError(f"unknown hook kind {kind!r} (use hex= for raw rows)")

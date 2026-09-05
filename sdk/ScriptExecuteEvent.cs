@@ -3,8 +3,10 @@ namespace Grandia.Sdk;
 /// <summary>
 /// Field VM is resolving a script id to an IP (<c>+0x6F0B0</c>).
 /// Use <see cref="Use(string)"/> for a compiled catalog script,
-/// <see cref="Replace"/> / <see cref="Script"/> to assemble live text,
-/// or set <see cref="Bytecode"/>. <see cref="Skip"/> treats the id as missing.
+/// <see cref="Replace"/> / <see cref="Script"/> to assemble live text
+/// in-process (no <c>field_tools</c>), or set <see cref="Bytecode"/>.
+/// <see cref="Script.Lines"/> decodes on first read.
+/// <see cref="Skip"/> treats the id as missing.
 /// </summary>
 public sealed class ScriptExecuteEvent
 {
@@ -26,7 +28,8 @@ public sealed class ScriptExecuteEvent
     /// Replacement script in the field assembler language (same ops as
     /// <see cref="Map.ReplaceScript"/>). Mutate in place, or call
     /// <see cref="Replace"/>. If <see cref="Script.Dirty"/> after mods run,
-    /// this is assembled and used instead of vanilla / <see cref="Bytecode"/>.
+    /// this is assembled for this arm only (next lookup is vanilla again
+    /// unless you write again, or <see cref="OnMapLoadAttribute"/> patched it).
     /// </summary>
     public Script Script { get; }
 

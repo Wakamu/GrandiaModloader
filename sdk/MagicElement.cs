@@ -1,6 +1,11 @@
 namespace Grandia.Sdk;
 
-/// <summary>Primary element from a spell's first F/W/U/E learn requirement.</summary>
+/// <summary>
+/// Mana-egg learn school from the first F/W/U/E requirement.
+/// In-battle labels like Forest / Ice / Thunder / Explosion are
+/// <see cref="CombatElement"/> combos on <see cref="MagicEvent.ElementFlags"/>,
+/// not extra values here. Cure and Poizn are Water+Earth → Forest.
+/// </summary>
 public enum MagicElement
 {
     None = 0,

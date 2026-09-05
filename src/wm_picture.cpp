@@ -21,10 +21,12 @@
 #pragma comment(lib, "d3dcompiler.lib")
 #pragma comment(lib, "ole32.lib")
 
+extern "C" int g_mod_wm_icon_loop_phase;
+
 namespace grandia_mod {
 namespace {
 
-constexpr int kSlots = 16;
+constexpr int kSlots = 32;
 constexpr std::uintptr_t kD3dDevicePtrRva = 0x2C22FCu;
 constexpr std::uintptr_t kCreateDeviceIatRva = 0x1FE478u;
 constexpr std::uintptr_t kScreenSizeRva = 0x2412E0u;
@@ -39,6 +41,7 @@ constexpr int kCtxDrawIndexed = 12;
 constexpr int kCtxDraw = 13;
 constexpr int kCtxDrawIndexedInstanced = 20;
 constexpr int kCtxDrawInstanced = 21;
+constexpr int kCtxRSSetViewports = 44;
 
 using CreateDeviceAndSwapFn = HRESULT(WINAPI*)(IDXGIAdapter*, D3D_DRIVER_TYPE, HMODULE, UINT,
                                                const D3D_FEATURE_LEVEL*, UINT, UINT,
@@ -55,6 +58,7 @@ using DrawIndexedFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT,
 using DrawInstancedFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT, UINT, UINT);
 using DrawIndexedInstancedFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT, UINT, INT,
                                                         UINT);
+using RsSetViewportsFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, const D3D11_VIEWPORT*);
 using PresentFn = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, UINT, UINT);
 
 void** g_create_device_iat = nullptr;
@@ -69,6 +73,7 @@ struct CustomPic {
     int dest_h = 0;
     int want_w = 0;
     int want_h = 0;
+    bool grey = false;
     unsigned tex_w = 0;
     unsigned tex_h = 0;
     ID3D11Texture2D* tex = nullptr;
@@ -105,27 +110,52 @@ void** g_ctx_slot_draw = nullptr;
 void** g_ctx_slot_draw_i = nullptr;
 void** g_ctx_slot_draw_in = nullptr;
 void** g_ctx_slot_draw_n = nullptr;
+void** g_ctx_slot_vp = nullptr;
 CreateTexture2DFn g_orig_create_tex = nullptr;
 PsSetSrvFn g_orig_ps_set_srv = nullptr;
+RsSetViewportsFn g_orig_rs_set_vp = nullptr;
 DrawFn g_orig_draw = nullptr;
 DrawIndexedFn g_orig_draw_indexed = nullptr;
 DrawInstancedFn g_orig_draw_instanced = nullptr;
 DrawIndexedInstancedFn g_orig_draw_indexed_instanced = nullptr;
 PresentFn g_orig_present = nullptr;
 void** g_present_slot = nullptr;
+IDXGISwapChain* g_swap = nullptr;
 bool g_wrapped_dev = false;
 bool g_wrapped_ctx = false;
 bool g_atlas_bound = false;
+bool g_drew_on_atlas = false;
+bool g_overlay_painted = false;
+bool g_saw_atlas_in_loop = false;
+D3D11_VIEWPORT g_atlas_vp{};
+UINT g_atlas_vp_n = 0;
+bool g_ui_vp_letterbox = false;
+bool g_apply_atlas_vp = false;
 bool g_in_overlay = false;
 bool g_gpu_ready = false;
 int g_overlay_logs = 0;
 int g_skip_logs = 0;
 int g_submit_logs = 0;
+int g_draw_logs = 0;
 DWORD g_dest_tick = 0;
 DWORD g_fade_start = 0;
 bool g_fade_hold = false;
+bool g_paint_after_loop = false;
+bool g_had_icon_loop = false;
+bool g_saw_post_loop_draw = false;
+int g_virt_sw = 320;
+int g_virt_sh = 240;
+std::uint8_t g_skip_adjust = 0;
+float g_x_off = 60.0f;
+float g_x_scale = 2.0f;
 constexpr DWORD kFadeMs = 1000;
 constexpr DWORD kDestFreshMs = 120;
+
+void EnsureLetterboxViewport();
+bool HaveDests(bool require_recent);
+bool TryDrawCustomPlates(const char* why, bool use_atlas_vp);
+void FindSwapChain();
+void TryWrapExistingDevice();
 
 void EnsureCom() {
     if (g_com) {
@@ -273,9 +303,11 @@ bool CompileShaders() {
             o.uv = i.uv;
             return o;
         }
-        cbuffer FadeBuf : register(b0) { float fade; float3 fade_pad; };
+        cbuffer FadeBuf : register(b0) { float fade; float locked; float2 fade_pad; };
         float4 ps(VSOut i) : SV_TARGET {
             float4 c = tex.Sample(samp, i.uv);
+            float g = dot(c.rgb, float3(0.299, 0.587, 0.114));
+            c.rgb = lerp(c.rgb, float3(g, g, g) * 0.65, locked);
             c *= fade;
             return c;
         }
@@ -403,49 +435,50 @@ float OverlayFade() {
     return 1.0f - static_cast<float>(dt) / static_cast<float>(kFadeMs);
 }
 
-void Ps1ToNdc(int x, int y, float* nx, float* ny) {
-    std::int16_t sw = 320;
-    std::int16_t sh = 240;
+void CacheSoftHdNdc() {
+    g_virt_sw = 320;
+    g_virt_sh = 240;
+    g_skip_adjust = 0;
+    g_x_off = 60.0f;
+    g_x_scale = 2.0f;
     const auto base = ModuleBase();
+    if (base == 0) {
+        return;
+    }
     std::uint32_t packed = 0;
-    if (base != 0 && SafeReadU32(base + kScreenSizeRva, &packed)) {
-        sw = static_cast<std::int16_t>(packed & 0xFFFF);
-        sh = static_cast<std::int16_t>(packed >> 16);
+    if (SafeReadU32(base + kScreenSizeRva, &packed)) {
+        const int sw = static_cast<std::int16_t>(packed & 0xFFFF);
+        const int sh = static_cast<std::int16_t>(packed >> 16);
+        // SoftHD +0x207E0 reads this during the icon loop as PS1 virtual
+        // size. By Present it can be the HD backbuffer; using that slams
+        // the overlay into the left pillarbox.
+        if (sw > 0 && sw <= 400 && sh > 0 && sh <= 300) {
+            g_virt_sw = sw;
+            g_virt_sh = sh;
+        }
     }
-    if (sw <= 0) {
-        sw = 320;
+    SafeReadByte(base + kHdAdjustFlagRva, &g_skip_adjust);
+    std::uint32_t bits = 0;
+    if (SafeReadU32(base + kHdXOffRva, &bits)) {
+        std::memcpy(&g_x_off, &bits, sizeof(g_x_off));
     }
-    if (sh <= 0) {
-        sh = 240;
+    if (SafeReadU32(base + kHdXOffScaleRva, &bits)) {
+        std::memcpy(&g_x_scale, &bits, sizeof(g_x_scale));
     }
+}
 
-    // SoftHD +0x207E0: when [640E7E]==0, dest X and virtual width get a
-    // widescreen offset ([6186C8], usually 60) so plates sit in the 4:3
-    // pillarbox. Same math or the overlay pans at the wrong rate.
+void Ps1ToNdc(int x, int y, float* nx, float* ny) {
+    // SoftHD +0x207E0 on a full-window VP: dest already includes camera
+    // (+0x110 + table). When [640E7E]==0 it does dest_x += x_off and
+    // sw += x_off * scale. Dropping that term makes the error grow as
+    // the camera pans (dest changes).
     float fx = static_cast<float>(x);
     float fy = static_cast<float>(y);
-    float fsw = static_cast<float>(sw);
-    float fsh = static_cast<float>(sh);
-    std::uint8_t skip_adjust = 1;
-    if (base != 0) {
-        SafeReadByte(base + kHdAdjustFlagRva, &skip_adjust);
-    }
-    if (skip_adjust == 0) {
-        float x_off = 60.0f;
-        float x_scale = 2.0f;
-        std::uint32_t bits = 0;
-        if (SafeReadU32(base + kHdXOffRva, &bits)) {
-            std::memcpy(&x_off, &bits, sizeof(x_off));
-        }
-        if (SafeReadU32(base + kHdXOffScaleRva, &bits)) {
-            std::memcpy(&x_scale, &bits, sizeof(x_scale));
-        }
-        fx += x_off;
-        fsw += x_off * x_scale;
-        if (g_submit_logs == 1) {
-            LogInfo("world-map HD: SoftHD NDC xoff=%.1f scale=%.1f sw=%.0f->%.0f", x_off, x_scale,
-                    static_cast<float>(sw), fsw);
-        }
+    float fsw = static_cast<float>(g_virt_sw > 0 ? g_virt_sw : 320);
+    float fsh = static_cast<float>(g_virt_sh > 0 ? g_virt_sh : 240);
+    if (g_skip_adjust == 0) {
+        fx += g_x_off;
+        fsw += g_x_off * g_x_scale;
     }
     if (fsw <= 0.0f) {
         fsw = 320.0f;
@@ -457,13 +490,13 @@ void Ps1ToNdc(int x, int y, float* nx, float* ny) {
     *ny = 1.0f - (fy / fsh) * 2.0f;
 }
 
-void DrawOverlays() {
+bool DrawOverlays() {
     if (!g_orig_draw || !EnsureGpu()) {
-        return;
+        return false;
     }
     const float fade = OverlayFade();
     if (fade <= 0.01f) {
-        return;
+        return false;
     }
 
     ID3D11InputLayout* old_layout = nullptr;
@@ -486,6 +519,8 @@ void DrawOverlays() {
     UINT old_stencil = 0;
     ID3D11RasterizerState* old_rast = nullptr;
     ID3D11Buffer* old_cb = nullptr;
+    UINT old_vp_n = 1;
+    D3D11_VIEWPORT old_vp{};
     g_ctx->IAGetInputLayout(&old_layout);
     g_ctx->IAGetVertexBuffers(0, 1, &old_vb, &old_stride, &old_offset);
     g_ctx->IAGetPrimitiveTopology(&old_topo);
@@ -497,17 +532,11 @@ void DrawOverlays() {
     g_ctx->OMGetDepthStencilState(&old_depth, &old_stencil);
     g_ctx->RSGetState(&old_rast);
     g_ctx->PSGetConstantBuffers(0, 1, &old_cb);
-
-    if (g_fade_cb) {
-        D3D11_MAPPED_SUBRESOURCE mapped_cb{};
-        if (SUCCEEDED(g_ctx->Map(g_fade_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped_cb)) &&
-            mapped_cb.pData) {
-            float* slot = static_cast<float*>(mapped_cb.pData);
-            slot[0] = fade;
-            slot[1] = 0.0f;
-            slot[2] = 0.0f;
-            slot[3] = 0.0f;
-            g_ctx->Unmap(g_fade_cb, 0);
+    g_ctx->RSGetViewports(&old_vp_n, &old_vp);
+    if (g_apply_atlas_vp) {
+        EnsureLetterboxViewport();
+        if (g_atlas_vp_n != 0) {
+            g_ctx->RSSetViewports(1, &g_atlas_vp);
         }
     }
 
@@ -515,29 +544,29 @@ void DrawOverlays() {
     bool any = false;
     for (int i = 0; i < kSlots; ++i) {
         CustomPic& pic = g_pics[i];
-        if (!pic.on || !pic.path[0] || pic.dest_w <= 0 || pic.dest_h <= 0) {
+        if (!pic.on || !pic.path[0] || (pic.dest_w <= 0 && pic.dest_h <= 0)) {
             continue;
         }
         if (!EnsurePicTexture(&pic)) {
             continue;
         }
-        int draw_w = pic.dest_w;
-        int draw_h = pic.dest_h;
-        if (pic.want_w > 0 && pic.want_h > 0) {
-            draw_w = pic.want_w;
-            draw_h = pic.want_h;
-        } else if (pic.want_w > 0) {
-            draw_w = pic.want_w;
-            if (pic.tex_w > 0 && pic.tex_h > 0) {
-                draw_h = static_cast<int>(
-                    (static_cast<unsigned>(pic.want_w) * pic.tex_h + pic.tex_w / 2) / pic.tex_w);
-            }
-        } else if (pic.want_h > 0) {
-            draw_h = pic.want_h;
-            if (pic.tex_w > 0 && pic.tex_h > 0) {
-                draw_w = static_cast<int>(
-                    (static_cast<unsigned>(pic.want_h) * pic.tex_w + pic.tex_h / 2) / pic.tex_h);
-            }
+        // Stock dest_w is the nameplate (128/192), not the icon. Size the
+        // overlay from the PNG / requested size only.
+        int draw_w = pic.want_w;
+        int draw_h = pic.want_h;
+        if (draw_w <= 0 && draw_h <= 0 && pic.tex_w > 0 && pic.tex_h > 0) {
+            draw_w = static_cast<int>(pic.tex_w);
+            draw_h = static_cast<int>(pic.tex_h);
+        } else if (draw_w > 0 && draw_h <= 0 && pic.tex_w > 0 && pic.tex_h > 0) {
+            draw_h = static_cast<int>(
+                (static_cast<unsigned>(draw_w) * pic.tex_h + pic.tex_w / 2) / pic.tex_w);
+        } else if (draw_h > 0 && draw_w <= 0 && pic.tex_w > 0 && pic.tex_h > 0) {
+            draw_w = static_cast<int>(
+                (static_cast<unsigned>(draw_h) * pic.tex_w + pic.tex_h / 2) / pic.tex_h);
+        } else if (draw_w <= 0) {
+            draw_w = 16;
+        } else if (draw_h <= 0) {
+            draw_h = 16;
         }
         if (draw_w < 1) {
             draw_w = 1;
@@ -555,8 +584,15 @@ void DrawOverlays() {
         float y0 = 0;
         float x1 = 0;
         float y1 = 0;
-        Ps1ToNdc(pic.dest_x, pic.dest_y, &x0, &y0);
-        Ps1ToNdc(pic.dest_x + draw_w, pic.dest_y + draw_h, &x1, &y1);
+        const int cell = 16;
+        const int pin_x = pic.dest_x + cell / 2 - draw_w / 2;
+        const int pin_y = pic.dest_y + cell / 2 - draw_h / 2;
+        Ps1ToNdc(pin_x, pin_y, &x0, &y0);
+        Ps1ToNdc(pin_x + draw_w, pin_y + draw_h, &x1, &y1);
+        if (g_overlay_logs < 1) {
+            LogInfo("world-map HD: NDC dest=(%d,%d) pin=(%d,%d) ndc=%.3f,%.3f..%.3f,%.3f virt=%dx%d",
+                    pic.dest_x, pic.dest_y, pin_x, pin_y, x0, y0, x1, y1, g_virt_sw, g_virt_sh);
+        }
         quad[0] = {x0, y0, 0.0f, 0.0f};
         quad[1] = {x1, y0, 1.0f, 0.0f};
         quad[2] = {x0, y1, 0.0f, 1.0f};
@@ -579,6 +615,16 @@ void DrawOverlays() {
         g_ctx->PSSetShaderResources(0, 1, &pic.srv);
         g_ctx->PSSetSamplers(0, 1, &g_samp);
         if (g_fade_cb) {
+            D3D11_MAPPED_SUBRESOURCE mapped_cb{};
+            if (SUCCEEDED(g_ctx->Map(g_fade_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped_cb)) &&
+                mapped_cb.pData) {
+                float* slot = static_cast<float*>(mapped_cb.pData);
+                slot[0] = fade;
+                slot[1] = pic.grey ? 1.0f : 0.0f;
+                slot[2] = 0.0f;
+                slot[3] = 0.0f;
+                g_ctx->Unmap(g_fade_cb, 0);
+            }
             g_ctx->PSSetConstantBuffers(0, 1, &g_fade_cb);
         }
         g_ctx->OMSetBlendState(g_blend, nullptr, 0xFFFFFFFF);
@@ -599,6 +645,9 @@ void DrawOverlays() {
     g_ctx->OMSetDepthStencilState(old_depth, old_stencil);
     g_ctx->RSSetState(old_rast);
     g_ctx->PSSetConstantBuffers(0, 1, &old_cb);
+    if (old_vp_n != 0) {
+        g_ctx->RSSetViewports(old_vp_n, &old_vp);
+    }
     if (old_layout) {
         old_layout->Release();
     }
@@ -640,6 +689,7 @@ void DrawOverlays() {
         ++g_overlay_logs;
         LogInfo("world-map HD: custom plate overlay active");
     }
+    return any;
 }
 
 bool SrvIsAtlas(ID3D11ShaderResourceView* srv) {
@@ -713,7 +763,7 @@ bool HaveDests(bool require_recent) {
         return false;
     }
     for (int i = 0; i < kSlots; ++i) {
-        if (g_pics[i].on && g_pics[i].path[0] && g_pics[i].dest_w > 0) {
+        if (g_pics[i].on && g_pics[i].path[0] && (g_pics[i].dest_w > 0 || g_pics[i].dest_h > 0)) {
             return true;
         }
     }
@@ -721,6 +771,8 @@ bool HaveDests(bool require_recent) {
 }
 
 void FindSwapChain();
+void TryWrapExistingDevice();
+void EnsureLetterboxViewport();
 
 void ClearOverlayDests() {
     for (int i = 0; i < kSlots; ++i) {
@@ -730,31 +782,88 @@ void ClearOverlayDests() {
     g_dest_tick = 0;
 }
 
-void TryDrawCustomPlates(const char* why) {
+bool TryDrawCustomPlates(const char* why, bool use_atlas_vp) {
     if (g_in_overlay || !g_ctx) {
-        return;
+        return false;
     }
     std::lock_guard<std::recursive_mutex> lock(g_pic_mutex);
     if (!HaveDests(false)) {
-        return;
+        return false;
     }
+    g_apply_atlas_vp = use_atlas_vp;
     g_in_overlay = true;
     const bool gpu = EnsureGpu();
     if (!gpu && g_skip_logs < 6) {
         ++g_skip_logs;
         LogWarn("world-map HD: overlay GPU not ready (%s)", why);
     }
+    bool drew = false;
     if (gpu) {
-        DrawOverlays();
+        drew = DrawOverlays();
     }
     g_in_overlay = false;
+    g_apply_atlas_vp = false;
+    return drew;
 }
 
-void AfterAtlasDraw() {
-    if (g_in_overlay || !g_ctx || !HaveDests(false)) {
+void NoteSoftHdViewport(const D3D11_VIEWPORT& vp) {
+    if (vp.Width < 64.0f || vp.Height < 64.0f) {
+        return;
+    }
+    const bool letterbox = vp.TopLeftX > 0.5f || vp.TopLeftY > 0.5f;
+    if (letterbox || !g_ui_vp_letterbox) {
+        g_atlas_vp = vp;
+        g_atlas_vp_n = 1;
+        g_ui_vp_letterbox = letterbox;
+        if (g_draw_logs < 6) {
+            ++g_draw_logs;
+            LogInfo("world-map HD: SoftHD VP %.0f,%.0f %.0fx%.0f letterbox=%d loop=%d", vp.TopLeftX,
+                    vp.TopLeftY, vp.Width, vp.Height, letterbox ? 1 : 0,
+                    g_paint_after_loop ? 1 : 0);
+        }
+    }
+}
+
+void NoteAtlasViewport() {
+    if (!g_ctx) {
+        return;
+    }
+    UINT n = 1;
+    D3D11_VIEWPORT vp{};
+    g_ctx->RSGetViewports(&n, &vp);
+    if (n != 0) {
+        NoteSoftHdViewport(vp);
+    }
+}
+
+void AfterGameDraw(UINT nprim) {
+    if (g_in_overlay || !g_ctx) {
         return;
     }
     FindSwapChain();
+    if (!HaveDests(false)) {
+        return;
+    }
+    NoteAtlasViewport();
+    if (g_paint_after_loop) {
+        g_saw_post_loop_draw = true;
+    }
+    if (!g_paint_after_loop || g_overlay_painted) {
+        return;
+    }
+    (void)nprim;
+    if (TryDrawCustomPlates("after-loop", false)) {
+        g_overlay_painted = true;
+        g_paint_after_loop = false;
+    }
+}
+
+void DrawAfterIconLoop() {
+    TryWrapExistingDevice();
+    FindSwapChain();
+    EnsureGpu();
+    g_paint_after_loop = true;
+    g_had_icon_loop = true;
 }
 
 void NoteAtlasSrv(ID3D11ShaderResourceView* const* views, UINT n) {
@@ -769,12 +878,19 @@ void NoteAtlasSrv(ID3D11ShaderResourceView* const* views, UINT n) {
 void TryHookSwapChain(IDXGISwapChain* sc);
 
 HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* self, UINT sync, UINT flags) {
-    if (HaveDests(true)) {
-        TryDrawCustomPlates("present");
+    if (!g_overlay_painted && !g_saw_post_loop_draw && HaveDests(false)) {
+        TryDrawCustomPlates("present", false);
     } else if (g_fade_hold && OverlayFade() <= 0.01f) {
         std::lock_guard<std::recursive_mutex> lock(g_pic_mutex);
         ClearOverlayDests();
     }
+    g_drew_on_atlas = false;
+    g_overlay_painted = false;
+    g_saw_atlas_in_loop = false;
+    g_paint_after_loop = false;
+    g_had_icon_loop = false;
+    g_saw_post_loop_draw = false;
+    g_mod_wm_icon_loop_phase = 0;
     return g_orig_present(self, sync, flags);
 }
 
@@ -792,26 +908,34 @@ void STDMETHODCALLTYPE HookPsSetSrv(ID3D11DeviceContext* self, UINT start, UINT 
     }
 }
 
+void STDMETHODCALLTYPE HookRSSetViewports(ID3D11DeviceContext* self, UINT n,
+                                          const D3D11_VIEWPORT* vps) {
+    g_orig_rs_set_vp(self, n, vps);
+    if (!g_in_overlay && HaveDests(false) && vps && n != 0) {
+        NoteSoftHdViewport(vps[0]);
+    }
+}
+
 void STDMETHODCALLTYPE HookDraw(ID3D11DeviceContext* self, UINT nvert, UINT start) {
     g_orig_draw(self, nvert, start);
-    AfterAtlasDraw();
+    AfterGameDraw(nvert);
 }
 
 void STDMETHODCALLTYPE HookDrawIndexed(ID3D11DeviceContext* self, UINT nidx, UINT start, INT base) {
     g_orig_draw_indexed(self, nidx, start, base);
-    AfterAtlasDraw();
+    AfterGameDraw(nidx);
 }
 
 void STDMETHODCALLTYPE HookDrawInstanced(ID3D11DeviceContext* self, UINT nvert, UINT ninst,
                                          UINT start, UINT start_inst) {
     g_orig_draw_instanced(self, nvert, ninst, start, start_inst);
-    AfterAtlasDraw();
+    AfterGameDraw(nvert * (ninst ? ninst : 1));
 }
 
 void STDMETHODCALLTYPE HookDrawIndexedInstanced(ID3D11DeviceContext* self, UINT nidx, UINT ninst,
                                                 UINT start, INT base, UINT start_inst) {
     g_orig_draw_indexed_instanced(self, nidx, ninst, start, base, start_inst);
-    AfterAtlasDraw();
+    AfterGameDraw(nidx * (ninst ? ninst : 1));
 }
 
 bool PatchVtableSlot(void* obj, int slot, void* hook, void** orig_fn, void*** slot_out) {
@@ -851,6 +975,11 @@ void TryHookSwapChain(IDXGISwapChain* sc) {
         LogWarn("world-map HD: failed to hook SwapChain Present");
         return;
     }
+    if (g_swap) {
+        g_swap->Release();
+    }
+    g_swap = sc;
+    g_swap->AddRef();
     LogInfo("world-map HD: hooked SwapChain Present");
 }
 
@@ -883,6 +1012,77 @@ void FindSwapChain() {
     res->Release();
 }
 
+void EnsureLetterboxViewport() {
+    if (g_ui_vp_letterbox && g_atlas_vp_n != 0) {
+        return;
+    }
+    UINT w = 0;
+    UINT h = 0;
+    if (g_swap) {
+        DXGI_SWAP_CHAIN_DESC desc{};
+        if (SUCCEEDED(g_swap->GetDesc(&desc))) {
+            w = desc.BufferDesc.Width;
+            h = desc.BufferDesc.Height;
+        }
+    }
+    if ((w == 0 || h == 0) && g_ctx) {
+        ID3D11RenderTargetView* rtv = nullptr;
+        g_ctx->OMGetRenderTargets(1, &rtv, nullptr);
+        if (rtv) {
+            ID3D11Resource* res = nullptr;
+            rtv->GetResource(&res);
+            rtv->Release();
+            ID3D11Texture2D* tex = nullptr;
+            if (res &&
+                SUCCEEDED(res->QueryInterface(__uuidof(ID3D11Texture2D),
+                                              reinterpret_cast<void**>(&tex))) &&
+                tex) {
+                D3D11_TEXTURE2D_DESC td{};
+                tex->GetDesc(&td);
+                w = td.Width;
+                h = td.Height;
+                tex->Release();
+            }
+            if (res) {
+                res->Release();
+            }
+        }
+    }
+    if (w == 0 || h == 0) {
+        return;
+    }
+    D3D11_VIEWPORT vp{};
+    vp.MinDepth = 0.0f;
+    vp.MaxDepth = 1.0f;
+    const float ww = static_cast<float>(w);
+    const float hh = static_cast<float>(h);
+    const float aspect = ww / hh;
+    const float want = (g_virt_sw > 0 && g_virt_sh > 0)
+                           ? static_cast<float>(g_virt_sw) / static_cast<float>(g_virt_sh)
+                           : (4.0f / 3.0f);
+    if (aspect > want + 0.01f) {
+        const float box = hh * want;
+        vp.TopLeftX = (ww - box) * 0.5f;
+        vp.TopLeftY = 0.0f;
+        vp.Width = box;
+        vp.Height = hh;
+    } else if (aspect + 0.01f < want) {
+        const float box = ww / want;
+        vp.TopLeftX = 0.0f;
+        vp.TopLeftY = (hh - box) * 0.5f;
+        vp.Width = ww;
+        vp.Height = box;
+    } else {
+        vp.TopLeftX = 0.0f;
+        vp.TopLeftY = 0.0f;
+        vp.Width = ww;
+        vp.Height = hh;
+    }
+    g_atlas_vp = vp;
+    g_atlas_vp_n = 1;
+    g_ui_vp_letterbox = vp.TopLeftX > 0.5f || vp.TopLeftY > 0.5f;
+}
+
 void WrapContext(ID3D11DeviceContext* ctx) {
     if (!ctx || g_wrapped_ctx) {
         return;
@@ -898,7 +1098,9 @@ void WrapContext(ID3D11DeviceContext* ctx) {
         !PatchVtableSlot(ctx, kCtxDrawIndexedInstanced,
                          reinterpret_cast<void*>(&HookDrawIndexedInstanced),
                          reinterpret_cast<void**>(&g_orig_draw_indexed_instanced),
-                         &g_ctx_slot_draw_in)) {
+                         &g_ctx_slot_draw_in) ||
+        !PatchVtableSlot(ctx, kCtxRSSetViewports, reinterpret_cast<void*>(&HookRSSetViewports),
+                         reinterpret_cast<void**>(&g_orig_rs_set_vp), &g_ctx_slot_vp)) {
         LogWarn("world-map HD: failed to hook D3D draw");
         return;
     }
@@ -1072,6 +1274,10 @@ void ReleaseGpu() {
 
 }  // namespace
 
+void DrawWorldMapOverlaysAfterIcons() {
+    DrawAfterIconLoop();
+}
+
 void ClearWorldMapCustomPictures() {
     std::lock_guard<std::recursive_mutex> lock(g_pic_mutex);
     for (int i = 0; i < kSlots; ++i) {
@@ -1094,7 +1300,8 @@ void WorldMapNotifyTravelStarted() {
     g_fade_hold = true;
 }
 
-void SetWorldMapCustomPicture(int icon, int x, int y, const char* path, int width, int height) {
+void SetWorldMapCustomPicture(int icon, int x, int y, const char* path, int width, int height,
+                              bool accessible) {
     (void)x;
     (void)y;
     if (icon < 0 || icon >= kSlots) {
@@ -1105,6 +1312,7 @@ void SetWorldMapCustomPicture(int icon, int x, int y, const char* path, int widt
     ReleasePicGpu(&pic);
     pic.tex_w = 0;
     pic.tex_h = 0;
+    pic.grey = !accessible;
     if (!path || !path[0]) {
         pic.on = false;
         pic.path[0] = 0;
@@ -1141,13 +1349,15 @@ void OnIconSubmit(int icon, int dest_x, int dest_y, int dest_w, int dest_h) {
     pic.dest_w = dest_w;
     pic.dest_h = dest_h;
     g_dest_tick = GetTickCount();
+    CacheSoftHdNdc();
     if (g_submit_logs < 6) {
         ++g_submit_logs;
-        LogInfo("world-map HD: icon=%d dest=(%d,%d %dx%d) skip SoftHD plate", icon, dest_x, dest_y,
-                dest_w, dest_h);
+        LogInfo("world-map HD: icon=%d dest=(%d,%d %dx%d) virt=%dx%d skip_adj=%u xoff=%.1f", icon,
+                dest_x, dest_y, dest_w, dest_h, g_virt_sw, g_virt_sh, g_skip_adjust, g_x_off);
     }
     TryWrapExistingDevice();
     FindSwapChain();
+    EnsureGpu();
 }
 
 bool InstallWorldMapPictureHook() {
@@ -1170,8 +1380,13 @@ void RemoveWorldMapPictureHook() {
     RestoreSlot(&g_ctx_slot_draw_i, reinterpret_cast<void*>(g_orig_draw_indexed));
     RestoreSlot(&g_ctx_slot_draw_n, reinterpret_cast<void*>(g_orig_draw_instanced));
     RestoreSlot(&g_ctx_slot_draw_in, reinterpret_cast<void*>(g_orig_draw_indexed_instanced));
+    RestoreSlot(&g_ctx_slot_vp, reinterpret_cast<void*>(g_orig_rs_set_vp));
     RestoreSlot(&g_present_slot, reinterpret_cast<void*>(g_orig_present));
     g_orig_present = nullptr;
+    if (g_swap) {
+        g_swap->Release();
+        g_swap = nullptr;
+    }
     ReleaseGpu();
     if (g_atlas) {
         g_atlas->Release();
@@ -1193,4 +1408,8 @@ void RemoveWorldMapPictureHook() {
 
 extern "C" void WorldMapOnIconSubmit(int icon, int dest_x, int dest_y, int dest_w, int dest_h) {
     grandia_mod::OnIconSubmit(icon, dest_x, dest_y, dest_w, dest_h);
+}
+
+extern "C" void WorldMapDrawOverlaysAfterIcons() {
+    grandia_mod::DrawWorldMapOverlaysAfterIcons();
 }

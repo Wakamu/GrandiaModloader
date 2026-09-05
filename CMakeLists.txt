@@ -16,6 +16,7 @@ add_library(GrandiaMod SHARED
     src/virt_file.cpp
     src/map_apply.cpp
     src/script_redirect.cpp
+    src/dialogue.cpp
     src/setup.cpp
     src/clr_host.cpp
     src/hook_util.cpp

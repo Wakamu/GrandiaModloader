@@ -178,3 +178,11 @@ public sealed class OnMagicAttribute : GameHookAttribute
     {
     }
 }
+
+[AttributeUsage(AttributeTargets.Method)]
+public sealed class OnDialogueAttribute : GameHookAttribute
+{
+    public OnDialogueAttribute() : base(typeof(DialogueEvent))
+    {
+    }
+}

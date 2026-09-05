@@ -7,6 +7,7 @@ void RemovePartyHooks();
 void TryRestoreFieldParty(bool field_map_fopen = false);
 void RestoreFieldPartyForSave();
 void RestoreShopPriceOverrides();
+void ReapplyShopSessionPrices();
 
 }  // namespace grandia_mod
 

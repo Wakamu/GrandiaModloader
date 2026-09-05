@@ -2,7 +2,7 @@
 
 Standalone **.NET mod SDK** for Grandia HD Remaster.
 
-Mods are C# class libraries that reference `Grandia.Sdk.dll`. A `[Mod]` entry class has an `[Init]` method that registers hook / service classes. Hook methods can have any name; the host finds them by attributes (`[OnTick]`, `[OnBattleLoad]`, …). Launch injects `GrandiaMod.dll`, which hosts `Grandia.Runtime` (x86 .NET 8). When the game `fopen`s a `.MDP` / `.SCN` / `.OFS`, the runtime builds a `Map`, runs every enabled mod, and assembles blobs through `field_tools.exe`. Custom scripts and hooks are not written over the live SCN/sec[7] copies. The VM lookup at `+0x6F0B0` (`OnScriptExecute`) and `call_hook` at `+0x53560` (`OnCallHook`) redirect those ids to the assembled buffers. Dest-arrival still opens stock files.
+Mods are C# class libraries that reference `Grandia.Sdk.dll`. A `[Mod]` entry class has an `[Init]` method that registers hook / service classes. Hook methods can have any name; the host finds them by attributes (`[OnTick]`, `[OnBattleLoad]`, …). Launch injects `GrandiaMod.dll`, which hosts `Grandia.Runtime` (x86 .NET 8). When the game `fopen`s a `.MDP` / `.SCN` / `.OFS`, the runtime builds a `Map` and runs every enabled mod. Scripts, hooks, and zones assemble in-process (C# codecs — no `field_tools` at play time). Custom scripts and hooks are not written over the live SCN/sec[7] copies. The VM lookup at `+0x6F0B0` (`OnScriptExecute`) and `call_hook` at `+0x53560` (`OnCallHook`) redirect those ids to the assembled buffers. Dest-arrival still opens stock files.
 
 ## Build
 
@@ -33,12 +33,33 @@ field_tools\field_tools.exe
 mods\
 ```
 
+```
+cmake --build build --config Release
+dotnet build runtime\Grandia.Runtime.csproj -c Release
+dotnet build sdk\Grandia.Sdk.csproj -c Release
+dotnet build modloader\Setup\Setup.wixproj -c Release
+```
+
+Each Setup build stamps a new MSI version (`1.{yy}.{day}{hour}` UTC). Re-running an older `1.0.0` MSI only Repairs and leaves Program Files unchanged. After install, launch the modloader once so `%AppData%\GrandiaModloader\runtime` picks up the new DLLs.
+
 ## Write a mod
 
+The installer ships a **Grandia Mod** project template (Visual Studio, Rider, and `dotnet new`). After installing the modloader:
+
+```powershell
+& "C:\Program Files (x86)\Grandia Modloader\templates\install-template.cmd"
+```
+
+Then **File → New → Project / Solution**, search **Grandia Mod**. From the CLI: `dotnet new grandiamod -n MyMod -o MyMod`.
+
+The generated project is `net8.0` / **x86**, references `Grandia.Sdk.dll` in the modloader install folder, and includes a `[Mod]` entry class. A Release/Debug build copies the DLL into `%AppData%\GrandiaModloader\mods\`.
+
+To author a project by hand:
+
 1. New C# class library: `net8.0`, `PlatformTarget` **x86**.
-2. Add a reference to `Grandia.Sdk.dll` (from `dist\` or `sdk\bin\Release\net8.0\`). Do not add the SDK project to your mod solution.
+2. Add a reference to `Grandia.Sdk.dll` (from the install folder, `dist\`, or `sdk\bin\Release\net8.0\`). Do not add the SDK project to your mod solution.
 3. One public `[Mod]` class with an `[Init]` method. Register hook classes and any services from there. Name, version, and description on `[Mod]` are what the modloader list shows.
-4. Build and copy **only the DLL** into `GrandiaFieldPatch\mods\` (or use **Add mod**). Maps, scripts, and PNGs are embedded in that DLL.
+4. Build and copy **only the DLL** into `%AppData%\GrandiaModloader\mods\` (or use **Add mod**). Maps, scripts, and PNGs are embedded in that DLL.
 
 ```xml
 <Project Sdk="Microsoft.NET.Sdk">
@@ -96,14 +117,20 @@ sealed class HubHooks
             yield
             """);
     }
+
+    [OnDialogue]
+    public void Talk(DialogueEvent e)
+    {
+        e.Markup = e.Markup.Replace("Justin", "Hero");
+    }
 }
 ```
 
 `[Init]` is `void Name()` or `void Name(ModContext ctx)`. Hook methods are `void Name(TheEvent e)` — the attribute picks the event, not the method name. `Game.Log.Info("...")` / `Game.Log.Warn("...")` append to `GrandiaMod.log`; `ctx.Log("...")` does the same from Init.
 
-Hook attributes: `[OnMapLoad]`, `[OnScriptExecute]`, `[OnCallHook]`, `[OnEventFlag]`, `[OnItemAssignUi]`, `[OnFieldGoldAdd]`, `[OnWorldMapLoad]`, `[OnWorldMapConfirm]`, `[OnMapTravel]`, `[OnSave]`, `[OnLoad]`, `[OnBattleSetup]`, `[OnBattleLoad]`, `[OnMenuOpen]`, `[OnEnemyLoaded]`, `[OnShopOpen]`, `[OnTick]`, `[OnTitleScreen]`, `[OnCharacter]`, `[OnItem]`, `[OnMagic]`.
+Hook attributes: `[OnMapLoad]`, `[OnScriptExecute]`, `[OnCallHook]`, `[OnEventFlag]`, `[OnItemAssignUi]`, `[OnFieldGoldAdd]`, `[OnWorldMapLoad]`, `[OnWorldMapConfirm]`, `[OnMapTravel]`, `[OnSave]`, `[OnLoad]`, `[OnBattleSetup]`, `[OnBattleLoad]`, `[OnMenuOpen]`, `[OnEnemyLoaded]`, `[OnShopOpen]`, `[OnTick]`, `[OnTitleScreen]`, `[OnCharacter]`, `[OnItem]`, `[OnMagic]`, `[OnDialogue]`.
 
-`[OnCharacter]` fires for ids 1–8 after a slot load copies into MapObj, and once on new game — mutate stats and `e.Learn(Skill.Burn)`. `[OnItem]` / `[OnMagic]` run on every status, shop, and stash WINDT load (the game recopies vanilla tables each time). Item `Cost` is buy gold; `SellPrice` defaults to Cost/2. `[OnMagic]` is WINDT sec7/sec8 (learn requirements, who can learn, power, MP/SP `Cost`, IP) plus STAT/BBG copies in battle. Magic `Cost` is the MP or SP number in menus; `IpCost` is the IP gauge.
+`[OnDialogue]` fires when a type-1 / type-8 textbox is about to run (`Map`, `ScriptId`, `OpIndex`, `Markup`). `Markup` decodes on first read and encodes only if you assign it (in-process C#, no `field_tools`). `e.Skip = true` drops that opcode and continues the script. `[OnCharacter]` fires for ids 1–8 after a slot load copies into MapObj, and once on new game — mutate stats and `e.Learn(Skill.Burn)`. `[OnItem]` / `[OnMagic]` run on every status, shop, and stash WINDT load (the game recopies vanilla tables each time). Item `Cost` is buy gold; `SellPrice` defaults to Cost/2. Item `Effect` is the skill id used when the item is used (Herbs → `Skill.Heal`); `EffectValue` is the magnitude (Herbs heal 15). `[OnMagic]` is WINDT sec7/sec8 (learn requirements, who can learn, power, MP/SP `Cost`, IP) plus STAT/BBG copies in battle. Magic `Cost` is the MP or SP number in menus; `IpCost` is the IP gauge. Magic / enemy-skill `Effect` is the combat class (`EffectType.Heal`, `Damage`, `Status`, …) and `Mode` is the subtype (`HealMode`, `DamageKind`, `StatusAilment`, `StatMod`, `ClearAilment`). `IpKnockback` is combat row +6 (Shockwave 3000, Lotus Cut 8500). `CriticalChance` is +17. Enemy damage-plus-ailment is `AddAilment` + `Chance` (header +0xF / +0x10), not a second EffectType.
 
 ### Assets (PNG, …)
 
@@ -164,7 +191,7 @@ public void UseCompiled(ScriptExecuteEvent e)
 }
 ```
 
-`e.Replace(...)` still assembles live. Last `Add` for the same name wins. A pre-built `scripts/hub_save.bin` embeds as-is.
+`e.Replace(...)` assembles in-process (no `field_tools`) for that arm only — the next lookup is vanilla unless you write again (or `OnMapLoad` / `GetScript` patched it). `e.Script.Lines` decodes that id on first read. Last `Add` for the same name wins. A pre-built `scripts/hub_save.bin` embeds as-is.
 
 Assemblies with no `[Mod]` still load exported `IMod` types.
 

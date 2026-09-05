@@ -12,15 +12,25 @@
 #include <cstring>
 
 extern "C" int ModFlagGet(unsigned event_id);
-extern "C" std::uint8_t g_mod_wm_picture[16]{};
-extern "C" std::uint8_t g_mod_wm_custom[16]{};
+extern "C" std::uint8_t g_mod_wm_picture[32] = {
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+};
+extern "C" std::uint8_t g_mod_wm_custom[32]{};
 extern "C" void* g_mod_wm_pic_resume = nullptr;
 extern "C" void* g_mod_wm_pic_skip = nullptr;
 extern "C" void* g_mod_wm_rows_resume = nullptr;
 extern "C" std::uint8_t* g_mod_wm_amap_rows = nullptr;
+extern "C" std::uint8_t* g_mod_wm_cursor_base = nullptr;
+extern "C" void* g_mod_wm_cursor_confirm_resume = nullptr;
+extern "C" void* g_mod_wm_cursor_dest_resume = nullptr;
+extern "C" void* g_mod_wm_cursor_init_resume = nullptr;
+extern "C" void* g_mod_wm_loop_resume = nullptr;
+extern "C" int g_mod_wm_force_draw = 0;
+extern "C" int g_mod_wm_icon_loop_phase = 0;
 
 static bool g_need_icon_count = false;
-static bool g_added_icon[16]{};
+static bool g_added_icon[32]{};
 static int g_apply_set_id = 0;
 
 static bool WriteBytes(void* dest, const void* src, std::size_t size) {
@@ -38,6 +48,13 @@ static bool WriteBytes(void* dest, const void* src, std::size_t size) {
 }
 
 extern "C" void ModAfterAmapRowCount();
+#if defined(_M_IX86)
+extern "C" void ModWmCursorConfirm();
+extern "C" void ModWmCursorDest();
+extern "C" void ModWorldMapCursorInitDetour();
+extern "C" void ModWmIconLoopStart();
+extern "C" void ModWmIconLoopEnd();
+#endif
 
 namespace grandia_mod {
 namespace {
@@ -55,6 +72,14 @@ constexpr std::uintptr_t kWorldMapIconUvRva = 0x59E3Fu;
 constexpr std::uintptr_t kWorldMapIconSkipRva = 0x59F1Bu;
 constexpr std::uintptr_t kWorldMapAmapRowsWriteRva = 0x59524u;
 constexpr std::uintptr_t kWorldMapAmapRowsResumeRva = 0x59529u;
+constexpr std::uintptr_t kWorldMapIconLoopStartRva = 0x59CCDu;
+constexpr std::uintptr_t kWorldMapIconLoopStartResumeRva = 0x59CD3u;
+constexpr std::uintptr_t kWorldMapIconLoopEndRva = 0x59F2Eu;
+constexpr std::uintptr_t kWorldMapCursorInitRva = 0x59684u;
+constexpr std::uintptr_t kWorldMapCursorInitResumeRva = 0x59689u;
+constexpr std::uintptr_t kWorldMapCursorIconRva = 0x241196u;
+constexpr std::uintptr_t kWorldMapCursorIconCopyRva = 0x24105Fu;
+constexpr std::uintptr_t kWorldMapAmapIndexRva = 0x24118Bu;
 constexpr std::uintptr_t kFlagBlobPtrRva = 0x318BD8u;
 constexpr std::uintptr_t kSetRemapRva = 0x200AB0u;
 constexpr std::uintptr_t kDestTableRva = 0x200920u;
@@ -68,11 +93,17 @@ constexpr std::size_t kPatchSize = 5;
 constexpr std::size_t kLoadPatchSize = 8;
 constexpr std::size_t kIconCountPatchSize = 7;
 constexpr std::size_t kIconUvPatchSize = 7;
-constexpr int kSlots = 16;
-constexpr int kDestPerSet = 25;
+constexpr int kStockSlots = 16;
+constexpr int kSlots = 32;
+constexpr int kStockDestPerSet = 25;
+constexpr int kDestPerSet = 32;
 constexpr int kSets = 4;
+constexpr int kStockAmapNav = 6;
+constexpr int kAmapNavPages = 16;
+constexpr int kStockCursorPerSet = kStockDestPerSet * kStockSlots;
 constexpr int kCursorPerSet = kDestPerSet * kSlots;
 constexpr std::uint16_t kRevealBit = 0x397u;
+constexpr std::uint16_t kVisitedBit = 0x397u;
 
 void* g_wm_site = nullptr;
 std::uint8_t g_wm_original[8]{};
@@ -85,22 +116,58 @@ void* g_wm_pic_site = nullptr;
 std::uint8_t g_wm_pic_original[8]{};
 void* g_wm_rows_site = nullptr;
 std::uint8_t g_wm_rows_original[8]{};
+void* g_wm_cursor_confirm_site = nullptr;
+std::uint8_t g_wm_cursor_confirm_original[16]{};
+void* g_wm_cursor_dest_site = nullptr;
+std::uint8_t g_wm_cursor_dest_original[16]{};
+void* g_wm_cursor_init_site = nullptr;
+std::uint8_t g_wm_cursor_init_original[8]{};
+void* g_wm_loop_start_site = nullptr;
+std::uint8_t g_wm_loop_start_original[8]{};
+void* g_wm_loop_end_site = nullptr;
+std::uint8_t g_wm_loop_end_original[8]{};
 
 void ResetPictures();
 void SetPicture(int icon, int picture);
 
 struct TableBackup {
-    std::uint8_t dest[kDestPerSet * kSets * 4]{};
-    std::uint8_t visited[kSlots * kSets * 2]{};
-    std::uint8_t cursor[kCursorPerSet * kSets]{};
-    std::uint8_t xy[kSlots * kSets * 4]{};
-    std::uint8_t nav[kSlots * kSets * 4]{};
-    std::uint8_t flags[kSlots * kSets * 2]{};
+    std::uint8_t dest[kStockDestPerSet * kSets * 4]{};
+    std::uint8_t visited[kStockSlots * kSets * 2]{};
+    std::uint8_t cursor[kStockCursorPerSet * kSets]{};
+    std::uint8_t xy[kStockSlots * kSets * 4]{};
+    std::uint8_t nav[kStockAmapNav * kStockSlots * 4]{};
+    std::uint8_t flags[kStockSlots * kSets * 2]{};
     std::uint8_t icon_count[kIconCountPatchSize]{};
     bool captured = false;
 };
 
+constexpr std::size_t kWideDest = static_cast<std::size_t>(kSets * kDestPerSet * 4);
+constexpr std::size_t kWideXy = static_cast<std::size_t>(kSets * kSlots * 4);
+constexpr std::size_t kWideFlags = static_cast<std::size_t>(kSets * kSlots * 2);
+constexpr std::size_t kWideVisited = static_cast<std::size_t>(kSets * kSlots * 2);
+constexpr std::size_t kWideNav = static_cast<std::size_t>(kAmapNavPages * kSlots * 4);
+constexpr std::size_t kWideCursor = static_cast<std::size_t>(kSets * kCursorPerSet);
+constexpr std::size_t kWideTotal =
+    kWideDest + kWideXy + kWideFlags + kWideVisited + kWideNav + kWideCursor;
+
 TableBackup g_tables{};
+std::uint8_t* g_wide = nullptr;
+std::uint8_t* g_dest = nullptr;
+std::uint8_t* g_xy = nullptr;
+std::uint8_t* g_flags = nullptr;
+std::uint8_t* g_visited = nullptr;
+std::uint8_t* g_nav = nullptr;
+std::uint8_t* g_cursor = nullptr;
+bool g_wide_patched = false;
+
+struct WidePatch {
+    void* site = nullptr;
+    std::uint8_t original[8]{};
+    std::size_t size = 0;
+};
+
+WidePatch g_wide_patches[48]{};
+unsigned g_wide_patch_n = 0;
 
 bool WriteMem(void* dest, const void* src, std::size_t size) {
     if (!dest || !src || size == 0) {
@@ -114,6 +181,45 @@ bool WriteMem(void* dest, const void* src, std::size_t size) {
     VirtualProtect(dest, size, old_protect, &old_protect);
     FlushInstructionCache(GetCurrentProcess(), dest, size);
     return true;
+}
+
+bool RecordPatch(void* site, const void* src, std::size_t size) {
+    if (!site || !src || size == 0 || size > 8 || g_wide_patch_n >= 48u) {
+        return false;
+    }
+    auto& p = g_wide_patches[g_wide_patch_n];
+    p.site = site;
+    p.size = size;
+    std::memcpy(p.original, site, size);
+    if (!WriteMem(site, src, size)) {
+        return false;
+    }
+    ++g_wide_patch_n;
+    return true;
+}
+
+void ExpandStockToWide() {
+    if (!g_dest || !g_xy || !g_tables.captured) {
+        return;
+    }
+    std::memset(g_wide, 0, kWideTotal);
+    for (int set = 0; set < kSets; ++set) {
+        std::memcpy(g_dest + set * kDestPerSet * 4, g_tables.dest + set * kStockDestPerSet * 4,
+                    kStockDestPerSet * 4);
+        std::memcpy(g_xy + set * kSlots * 4, g_tables.xy + set * kStockSlots * 4, kStockSlots * 4);
+        std::memcpy(g_flags + set * kSlots * 2, g_tables.flags + set * kStockSlots * 2,
+                    kStockSlots * 2);
+        std::memcpy(g_visited + set * kSlots * 2, g_tables.visited + set * kStockSlots * 2,
+                    kStockSlots * 2);
+        for (int ctx = 0; ctx < kStockDestPerSet; ++ctx) {
+            std::memcpy(g_cursor + set * kCursorPerSet + ctx * kSlots,
+                        g_tables.cursor + set * kStockCursorPerSet + ctx * kStockSlots, kStockSlots);
+        }
+    }
+    for (int amap = 0; amap < kStockAmapNav; ++amap) {
+        std::memcpy(g_nav + amap * kSlots * 4, g_tables.nav + amap * kStockSlots * 4,
+                    kStockSlots * 4);
+    }
 }
 
 void CaptureTables(std::uintptr_t base) {
@@ -138,14 +244,259 @@ void RestoreTables(std::uintptr_t base) {
         return;
     }
     WriteMem(reinterpret_cast<void*>(base + kDestTableRva), g_tables.dest, sizeof(g_tables.dest));
-    WriteMem(reinterpret_cast<void*>(base + kVisitedTableRva), g_tables.visited,
-             sizeof(g_tables.visited));
-    WriteMem(reinterpret_cast<void*>(base + kCursorTableRva), g_tables.cursor, sizeof(g_tables.cursor));
-    WriteMem(reinterpret_cast<void*>(base + kXyTableRva), g_tables.xy, sizeof(g_tables.xy));
-    WriteMem(reinterpret_cast<void*>(base + kNavTableRva), g_tables.nav, sizeof(g_tables.nav));
-    WriteMem(reinterpret_cast<void*>(base + kFlagTableRva), g_tables.flags, sizeof(g_tables.flags));
     WriteMem(reinterpret_cast<void*>(base + kWorldMapIconCountRva), g_tables.icon_count,
              kIconCountPatchSize);
+    ExpandStockToWide();
+}
+
+bool PatchU32(std::uintptr_t base, std::uintptr_t rva, std::uint32_t expect, std::uint32_t want) {
+    auto* p = reinterpret_cast<std::uint8_t*>(base + rva);
+    std::uint32_t have = 0;
+    std::memcpy(&have, p, 4);
+    if (have != expect) {
+        LogWarn("world-map table imm mismatch at +0x%X (have 0x%08X)", static_cast<unsigned>(rva),
+                have);
+        return false;
+    }
+    return RecordPatch(p, &want, 4);
+}
+
+bool PatchShl5(std::uintptr_t base, std::uintptr_t rva) {
+    auto* p = reinterpret_cast<std::uint8_t*>(base + rva);
+    if (p[0] != 0xC1 || p[2] != 0x04) {
+        LogWarn("world-map shl mismatch at +0x%X", static_cast<unsigned>(rva));
+        return false;
+    }
+    std::uint8_t next[3] = {p[0], p[1], 0x05};
+    return RecordPatch(p, next, 3);
+}
+
+bool PatchImul32(std::uintptr_t base, std::uintptr_t rva) {
+    auto* p = reinterpret_cast<std::uint8_t*>(base + rva);
+    if (p[0] != 0x6B || p[2] != 0x19) {
+        LogWarn("world-map dest imul mismatch at +0x%X", static_cast<unsigned>(rva));
+        return false;
+    }
+    const std::uint8_t next[3] = {p[0], p[1], 0x20};
+    return RecordPatch(p, next, 3);
+}
+
+bool AllocWideTables() {
+    if (g_wide) {
+        return true;
+    }
+    g_wide = static_cast<std::uint8_t*>(VirtualAlloc(nullptr, kWideTotal, MEM_COMMIT | MEM_RESERVE,
+                                                    PAGE_READWRITE));
+    if (!g_wide) {
+        return false;
+    }
+    g_dest = g_wide;
+    g_xy = g_dest + kWideDest;
+    g_flags = g_xy + kWideXy;
+    g_visited = g_flags + kWideFlags;
+    g_nav = g_visited + kWideVisited;
+    g_cursor = g_nav + kWideNav;
+    g_mod_wm_cursor_base = g_cursor;
+    return true;
+}
+
+void FreeWideTables() {
+    g_mod_wm_cursor_base = nullptr;
+    g_dest = nullptr;
+    g_xy = nullptr;
+    g_flags = nullptr;
+    g_visited = nullptr;
+    g_nav = nullptr;
+    g_cursor = nullptr;
+    if (g_wide) {
+        VirtualFree(g_wide, 0, MEM_RELEASE);
+        g_wide = nullptr;
+    }
+}
+
+bool InstallWideTables(std::uintptr_t base) {
+    if (g_wide_patched) {
+        return true;
+    }
+    CaptureTables(base);
+    if (!AllocWideTables()) {
+        LogWarn("world-map wide tables alloc failed");
+        return false;
+    }
+    ExpandStockToWide();
+
+    auto rollback = [&]() {
+        if (g_wm_cursor_confirm_site) {
+            RestoreBytes(g_wm_cursor_confirm_site, g_wm_cursor_confirm_original, 10);
+            g_wm_cursor_confirm_site = nullptr;
+        }
+        if (g_wm_cursor_dest_site) {
+            RestoreBytes(g_wm_cursor_dest_site, g_wm_cursor_dest_original, 9);
+            g_wm_cursor_dest_site = nullptr;
+        }
+        for (unsigned i = g_wide_patch_n; i > 0; --i) {
+            auto& p = g_wide_patches[i - 1];
+            if (p.site && p.size) {
+                WriteMem(p.site, p.original, p.size);
+            }
+        }
+        g_wide_patch_n = 0;
+        FreeWideTables();
+    };
+
+    const auto dest_addr = static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(g_dest));
+    const auto xy = static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(g_xy));
+    const auto nav = static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(g_nav));
+    const auto flags = static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(g_flags));
+    const auto visited = static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(g_visited));
+
+    if (!PatchImul32(base, 0x5898Fu) || !PatchImul32(base, 0x58CF5u)) {
+        rollback();
+        return false;
+    }
+    const auto stock_dest = static_cast<std::uint32_t>(base + kDestTableRva);
+    if (!PatchU32(base, 0x589ABu, stock_dest, dest_addr) ||
+        !PatchU32(base, 0x589B9u, stock_dest + 2, dest_addr + 2) ||
+        !PatchU32(base, 0x58D20u, stock_dest, dest_addr) ||
+        !PatchU32(base, 0x58D28u, stock_dest + 2, dest_addr + 2)) {
+        rollback();
+        return false;
+    }
+
+    const std::uintptr_t shl[] = {0x598CBu, 0x599BFu, 0x59BA3u, 0x59CDCu, 0x59D67u, 0x58A05u,
+                                  0x58A26u, 0x58ABEu, 0x58ADBu, 0x58B73u, 0x58B94u, 0x58C2Bu,
+                                  0x58C48u};
+    for (auto rva : shl) {
+        if (!PatchShl5(base, rva)) {
+            rollback();
+            return false;
+        }
+    }
+
+    const auto stock_xy = static_cast<std::uint32_t>(base + kXyTableRva);
+    const auto stock_nav = static_cast<std::uint32_t>(base + kNavTableRva);
+    const auto stock_flags = static_cast<std::uint32_t>(base + kFlagTableRva);
+    const auto stock_visited = static_cast<std::uint32_t>(base + kVisitedTableRva);
+
+    const std::uintptr_t xy_imm[] = {0x598D9u, 0x599D2u, 0x59BAEu, 0x59D37u};
+    const std::uintptr_t xy2_imm[] = {0x598E9u, 0x599CAu, 0x59BB6u, 0x59D41u};
+    const std::uintptr_t flag_imm[] = {0x59D70u, 0x58A2Fu, 0x58AE4u, 0x58B9Du, 0x58C51u};
+    const std::uintptr_t vis_imm[] = {0x59DBCu, 0x58A4Bu, 0x58B00u, 0x58BB9u, 0x58C6Du};
+    for (auto rva : xy_imm) {
+        if (!PatchU32(base, rva, stock_xy, xy)) {
+            rollback();
+            return false;
+        }
+    }
+    for (auto rva : xy2_imm) {
+        if (!PatchU32(base, rva, stock_xy + 2, xy + 2)) {
+            rollback();
+            return false;
+        }
+    }
+    if (!PatchU32(base, 0x58A0Du, stock_nav, nav) ||
+        !PatchU32(base, 0x58AC6u, stock_nav + 1, nav + 1) ||
+        !PatchU32(base, 0x58B7Bu, stock_nav + 2, nav + 2) ||
+        !PatchU32(base, 0x58C33u, stock_nav + 3, nav + 3)) {
+        rollback();
+        return false;
+    }
+    for (auto rva : flag_imm) {
+        if (!PatchU32(base, rva, stock_flags, flags)) {
+            rollback();
+            return false;
+        }
+    }
+    for (auto rva : vis_imm) {
+        if (!PatchU32(base, rva, stock_visited, visited)) {
+            rollback();
+            return false;
+        }
+    }
+
+    auto* batch = reinterpret_cast<std::uint8_t*>(base + 0x59E80u);
+    if (batch[0] != 0x80 || batch[1] != 0xFF || batch[2] != 0x10) {
+        LogWarn("world-map sprite-batch cmp mismatch at +0x59E80");
+        rollback();
+        return false;
+    }
+    const std::uint8_t batch_to[3] = {0x80, 0xFF, 0x20};
+    if (!RecordPatch(batch, batch_to, 3)) {
+        rollback();
+        return false;
+    }
+
+#if defined(_M_IX86)
+    auto* confirm = reinterpret_cast<std::uint8_t*>(base + 0x5899Bu);
+    auto* dest = reinterpret_cast<std::uint8_t*>(base + 0x58D01u);
+    if (confirm[0] != 0x03 || confirm[1] != 0xC9 || dest[0] != 0x03 || dest[1] != 0xC9) {
+        LogWarn("world-map cursor lookup bytes mismatch");
+        rollback();
+        return false;
+    }
+    g_mod_wm_cursor_confirm_resume = reinterpret_cast<void*>(base + 0x589A5u);
+    g_mod_wm_cursor_dest_resume = reinterpret_cast<void*>(base + 0x58D0Au);
+    if (!WriteJump(confirm, reinterpret_cast<void*>(&ModWmCursorConfirm),
+                   g_wm_cursor_confirm_original, 10)) {
+        LogWarn("world-map cursor widen failed");
+        rollback();
+        return false;
+    }
+    g_wm_cursor_confirm_site = confirm;
+    if (!WriteJump(dest, reinterpret_cast<void*>(&ModWmCursorDest), g_wm_cursor_dest_original,
+                   9)) {
+        LogWarn("world-map cursor widen failed");
+        rollback();
+        return false;
+    }
+    g_wm_cursor_dest_site = dest;
+#endif
+
+    g_wide_patched = true;
+    LogInfo("OnWorldMapLoad: 32 icon/dest slots (custom plates for 16+)");
+    return true;
+}
+
+void RemoveWideTables(std::uintptr_t base) {
+    if (g_wm_cursor_confirm_site) {
+        RestoreBytes(g_wm_cursor_confirm_site, g_wm_cursor_confirm_original, 10);
+        g_wm_cursor_confirm_site = nullptr;
+    }
+    if (g_wm_cursor_dest_site) {
+        RestoreBytes(g_wm_cursor_dest_site, g_wm_cursor_dest_original, 9);
+        g_wm_cursor_dest_site = nullptr;
+    }
+    for (unsigned i = g_wide_patch_n; i > 0; --i) {
+        auto& p = g_wide_patches[i - 1];
+        if (p.site && p.size) {
+            WriteMem(p.site, p.original, p.size);
+        }
+    }
+    g_wide_patch_n = 0;
+    g_wide_patched = false;
+    if (g_tables.captured) {
+        WriteMem(reinterpret_cast<void*>(base + kDestTableRva), g_tables.dest, sizeof(g_tables.dest));
+        WriteMem(reinterpret_cast<void*>(base + kVisitedTableRva), g_tables.visited,
+                 sizeof(g_tables.visited));
+        WriteMem(reinterpret_cast<void*>(base + kCursorTableRva), g_tables.cursor,
+                 sizeof(g_tables.cursor));
+        WriteMem(reinterpret_cast<void*>(base + kXyTableRva), g_tables.xy, sizeof(g_tables.xy));
+        WriteMem(reinterpret_cast<void*>(base + kNavTableRva), g_tables.nav, sizeof(g_tables.nav));
+        WriteMem(reinterpret_cast<void*>(base + kFlagTableRva), g_tables.flags, sizeof(g_tables.flags));
+        WriteMem(reinterpret_cast<void*>(base + kWorldMapIconCountRva), g_tables.icon_count,
+                 kIconCountPatchSize);
+    }
+    FreeWideTables();
+}
+
+int ClampAmap(int amap) {
+    if (amap < 0) {
+        return 0;
+    }
+    if (amap >= kAmapNavPages) {
+        return kAmapNavPages - 1;
+    }
+    return amap;
 }
 
 void WriteU16(std::uint8_t* p, std::uint16_t v) {
@@ -212,9 +563,108 @@ int FindFreeIcon(const std::uint8_t* flags, const std::uint8_t* xy, const bool* 
     return -1;
 }
 
-void ApplyDests(std::uintptr_t base, int set_id, const WorldMapLoadNative& req,
+bool IconLandable(std::uint16_t flag, std::uint16_t vis) {
+    if (flag == 0 || vis == 0) {
+        return false;
+    }
+    return ModFlagGet(flag) > 0 && ModFlagGet(vis) > 0;
+}
+
+int Dist2(int x0, int y0, int x1, int y1) {
+    const int dx = x1 - x0;
+    const int dy = y1 - y0;
+    return dx * dx + dy * dy;
+}
+
+void RebuildAccessibleNav(std::uint8_t* nav, const std::uint8_t* xy, const std::uint8_t* flags,
+                          const std::uint8_t* visited) {
+    bool land[kSlots]{};
+    int xs[kSlots]{};
+    int ys[kSlots]{};
+    for (int i = 0; i < kSlots; ++i) {
+        xs[i] = static_cast<std::int16_t>(ReadU16(xy + i * 4));
+        ys[i] = static_cast<std::int16_t>(ReadU16(xy + i * 4 + 2));
+        land[i] = IconLandable(ReadU16(flags + i * 2), ReadU16(visited + i * 2));
+        nav[i * 4 + 0] = 0xFF;
+        nav[i * 4 + 1] = 0xFF;
+        nav[i * 4 + 2] = 0xFF;
+        nav[i * 4 + 3] = 0xFF;
+    }
+    for (int i = 0; i < kSlots; ++i) {
+        if (!land[i]) {
+            continue;
+        }
+        for (int dir = 0; dir < 4; ++dir) {
+            int best = -1;
+            int best_d = 0x7fffffff;
+            for (int j = 0; j < kSlots; ++j) {
+                if (j == i || !land[j]) {
+                    continue;
+                }
+                const int dx = xs[j] - xs[i];
+                const int dy = ys[j] - ys[i];
+                if (dir == 0 && dy >= 0) {
+                    continue;
+                }
+                if (dir == 1 && dy <= 0) {
+                    continue;
+                }
+                if (dir == 2 && dx >= 0) {
+                    continue;
+                }
+                if (dir == 3 && dx <= 0) {
+                    continue;
+                }
+                const int d = Dist2(xs[i], ys[i], xs[j], ys[j]);
+                if (d < best_d || (d == best_d && (best < 0 || j < best))) {
+                    best_d = d;
+                    best = j;
+                }
+            }
+            if (best >= 0) {
+                nav[i * 4 + dir] = static_cast<std::uint8_t>(best);
+            }
+        }
+    }
+}
+
+int PickAccessibleStart(int set_id, int suggested) {
+    if (set_id < 0 || set_id >= kSets || !g_flags || !g_visited || !g_xy) {
+        return suggested;
+    }
+    const auto* flags = g_flags + set_id * kSlots * 2;
+    const auto* visited = g_visited + set_id * kSlots * 2;
+    const auto* xy = g_xy + set_id * kSlots * 4;
+    if (suggested >= 0 && suggested < kSlots &&
+        IconLandable(ReadU16(flags + suggested * 2), ReadU16(visited + suggested * 2))) {
+        return suggested;
+    }
+    const bool have_from = suggested >= 0 && suggested < kSlots;
+    const int sx = have_from ? static_cast<std::int16_t>(ReadU16(xy + suggested * 4)) : 0;
+    const int sy = have_from ? static_cast<std::int16_t>(ReadU16(xy + suggested * 4 + 2)) : 0;
+    int best = -1;
+    int best_d = 0x7fffffff;
+    for (int i = 0; i < kSlots; ++i) {
+        if (!IconLandable(ReadU16(flags + i * 2), ReadU16(visited + i * 2))) {
+            continue;
+        }
+        if (!have_from) {
+            return i;
+        }
+        const int d = Dist2(sx, sy, static_cast<std::int16_t>(ReadU16(xy + i * 4)),
+                            static_cast<std::int16_t>(ReadU16(xy + i * 4 + 2)));
+        if (d < best_d || (d == best_d && (best < 0 || i < best))) {
+            best_d = d;
+            best = i;
+        }
+    }
+    return best >= 0 ? best : suggested;
+}
+
+void ApplyDests(std::uintptr_t base, int set_id, int amap, const WorldMapLoadNative& req,
                 const WorldMapLoadNative& before) {
-    if (set_id < 0 || set_id >= kSets) {
+    (void)base;
+    if (set_id < 0 || set_id >= kSets || !g_dest || !g_xy) {
         return;
     }
     int n = req.count;
@@ -224,12 +674,13 @@ void ApplyDests(std::uintptr_t base, int set_id, const WorldMapLoadNative& req,
     if (n > kSlots) {
         n = kSlots;
     }
+    amap = ClampAmap(amap);
 
-    auto* dest = reinterpret_cast<std::uint8_t*>(base + kDestTableRva + set_id * kDestPerSet * 4);
-    auto* xy = reinterpret_cast<std::uint8_t*>(base + kXyTableRva + set_id * kSlots * 4);
-    auto* flags = reinterpret_cast<std::uint8_t*>(base + kFlagTableRva + set_id * kSlots * 2);
-    auto* nav = reinterpret_cast<std::uint8_t*>(base + kNavTableRva + set_id * kSlots * 4);
-    auto* cursor = reinterpret_cast<std::uint8_t*>(base + kCursorTableRva + set_id * kCursorPerSet);
+    auto* dest = g_dest + set_id * kDestPerSet * 4;
+    auto* xy = g_xy + set_id * kSlots * 4;
+    auto* flags = g_flags + set_id * kSlots * 2;
+    auto* nav = g_nav + amap * kSlots * 4;
+    auto* cursor = g_cursor + set_id * kCursorPerSet;
 
     std::uint8_t dest_bytes[kDestPerSet * 4]{};
     std::memcpy(dest_bytes, dest, sizeof(dest_bytes));
@@ -241,6 +692,9 @@ void ApplyDests(std::uintptr_t base, int set_id, const WorldMapLoadNative& req,
     std::memcpy(cursor_bytes, cursor, sizeof(cursor_bytes));
     std::uint8_t nav_bytes[kSlots * 4]{};
     std::memcpy(nav_bytes, nav, sizeof(nav_bytes));
+    auto* visited = g_visited + set_id * kSlots * 2;
+    std::uint8_t visited_bytes[kSlots * 2]{};
+    std::memcpy(visited_bytes, visited, sizeof(visited_bytes));
 
     bool seen[kSlots]{};
     bool kept[kSlots]{};
@@ -281,32 +735,13 @@ void ApplyDests(std::uintptr_t base, int set_id, const WorldMapLoadNative& req,
             }
             WriteI16(xy_bytes + icon * 4, x);
             WriteI16(xy_bytes + icon * 4 + 2, y);
-            WriteU16(flag_bytes + icon * 2, kRevealBit);
-            nav_bytes[icon * 4 + 0] = 0;
-            nav_bytes[icon * 4 + 1] = 0;
-            nav_bytes[icon * 4 + 2] = 0;
-            nav_bytes[icon * 4 + 3] = 0;
-            bool linked = false;
-            for (int s = 0; s < kSlots && !linked; ++s) {
-                if (s == icon || ReadU16(flag_bytes + s * 2) == 0) {
-                    continue;
-                }
-                for (int dir = 0; dir < 4; ++dir) {
-                    if (nav_bytes[s * 4 + dir] == 0xFF) {
-                        nav_bytes[s * 4 + dir] = static_cast<std::uint8_t>(icon);
-                        linked = true;
-                        break;
-                    }
-                }
-            }
+            WriteU16(flag_bytes + icon * 2, req.revealed[i] ? kRevealBit : 0);
+            WriteU16(visited_bytes + icon * 2, req.accessible[i] ? kVisitedBit : 0);
             SetPicture(icon, req.picture[i] >= 0 ? req.picture[i] : 0);
             SetWorldMapCustomPicture(icon, static_cast<int>(x), static_cast<int>(y),
-                                     req.picture_path[i], req.picture_w[i], req.picture_h[i]);
+                                     req.picture_path[i], req.picture_w[i], req.picture_h[i],
+                                     req.accessible[i] != 0);
             g_mod_wm_custom[icon] = req.picture_path[i][0] ? 1 : 0;
-            LogInfo("OnWorldMapLoad add 0x%04X icon=%d dest=%d xy=(%d,%d) pic=%d custom=%d",
-                    req.map_id[i], icon, dest_slot, static_cast<int>(x), static_cast<int>(y),
-                    static_cast<int>(g_mod_wm_picture[icon] == 0xFF ? icon : g_mod_wm_picture[icon]),
-                    static_cast<int>(g_mod_wm_custom[icon]));
             continue;
         }
 
@@ -314,7 +749,7 @@ void ApplyDests(std::uintptr_t base, int set_id, const WorldMapLoadNative& req,
         kept[icon] = true;
         SetPicture(icon, req.picture[i]);
         SetWorldMapCustomPicture(icon, req.x[i], req.y[i], req.picture_path[i], req.picture_w[i],
-                                 req.picture_h[i]);
+                                 req.picture_h[i], req.accessible[i] != 0);
         g_mod_wm_custom[icon] = req.picture_path[i][0] ? 1 : 0;
         int before_i = -1;
         for (int b = 0; b < before.count && b < kSlots; ++b) {
@@ -325,7 +760,8 @@ void ApplyDests(std::uintptr_t base, int set_id, const WorldMapLoadNative& req,
         }
         if (before_i >= 0 && req.map_id[i] == before.map_id[before_i] &&
             req.aux[i] == before.aux[before_i] && req.x[i] == before.x[before_i] &&
-            req.y[i] == before.y[before_i] && req.revealed[i] == before.revealed[before_i]) {
+            req.y[i] == before.y[before_i] && req.revealed[i] == before.revealed[before_i] &&
+            req.accessible[i] == before.accessible[before_i]) {
             continue;
         }
 
@@ -341,6 +777,7 @@ void ApplyDests(std::uintptr_t base, int set_id, const WorldMapLoadNative& req,
         WriteI16(xy_bytes + icon * 4 + 2, req.y[i]);
         const std::uint16_t bit = req.revealed[i] ? kRevealBit : 0;
         WriteU16(flag_bytes + icon * 2, bit);
+        WriteU16(visited_bytes + icon * 2, req.accessible[i] ? kVisitedBit : 0);
     }
 
     for (int i = 0; i < before.count && i < kSlots; ++i) {
@@ -350,15 +787,26 @@ void ApplyDests(std::uintptr_t base, int set_id, const WorldMapLoadNative& req,
         }
         HideIcon(cursor_bytes, icon);
         WriteU16(flag_bytes + icon * 2, 0);
+        WriteU16(visited_bytes + icon * 2, 0);
     }
+
+    RebuildAccessibleNav(nav_bytes, xy_bytes, flag_bytes, visited_bytes);
 
     WriteMem(dest, dest_bytes, sizeof(dest_bytes));
     WriteMem(xy, xy_bytes, sizeof(xy_bytes));
     WriteMem(flags, flag_bytes, sizeof(flag_bytes));
+    WriteMem(visited, visited_bytes, sizeof(visited_bytes));
     WriteMem(nav, nav_bytes, sizeof(nav_bytes));
     WriteMem(cursor, cursor_bytes, sizeof(cursor_bytes));
 
-    g_need_icon_count = added;
+    bool extra_icon = added;
+    for (int s = kStockSlots; s < kSlots; ++s) {
+        if (ReadU16(flag_bytes + s * 2) != 0) {
+            extra_icon = true;
+            added_icon[s] = true;
+        }
+    }
+    g_need_icon_count = extra_icon;
     g_apply_set_id = set_id;
     std::memcpy(g_added_icon, added_icon, sizeof(g_added_icon));
 }
@@ -404,6 +852,7 @@ void ResetPictures() {
     std::memset(g_mod_wm_custom, 0, kSlots);
     std::memset(g_added_icon, 0, sizeof(g_added_icon));
     g_need_icon_count = false;
+    g_mod_wm_force_draw = 0;
 }
 
 void SetPicture(int icon, int picture) {
@@ -429,19 +878,17 @@ int ReadOriginCtx(std::uintptr_t base) {
 }
 
 void FillFromTables(std::uintptr_t base, int set_id, WorldMapLoadNative* req) {
+    (void)base;
     req->count = 0;
-    if (set_id < 0 || set_id >= kSets) {
+    if (set_id < 0 || set_id >= kSets || !g_dest || !g_xy) {
         return;
     }
     const int origin = req->origin_ctx;
-    const auto* dest =
-        reinterpret_cast<const std::uint16_t*>(base + kDestTableRva + set_id * kDestPerSet * 4);
-    const auto* xy =
-        reinterpret_cast<const std::int16_t*>(base + kXyTableRva + set_id * kSlots * 4);
-    const auto* flags =
-        reinterpret_cast<const std::uint16_t*>(base + kFlagTableRva + set_id * kSlots * 2);
-    const auto* cursor =
-        reinterpret_cast<const std::uint8_t*>(base + kCursorTableRva + set_id * kCursorPerSet);
+    const auto* dest = reinterpret_cast<const std::uint16_t*>(g_dest + set_id * kDestPerSet * 4);
+    const auto* xy = reinterpret_cast<const std::int16_t*>(g_xy + set_id * kSlots * 4);
+    const auto* flags = reinterpret_cast<const std::uint16_t*>(g_flags + set_id * kSlots * 2);
+    const auto* visited = reinterpret_cast<const std::uint16_t*>(g_visited + set_id * kSlots * 2);
+    const auto* cursor = g_cursor + set_id * kCursorPerSet;
     const auto hub = dest[0];
     for (int icon = 0; icon < kSlots; ++icon) {
         const auto flag = flags[icon];
@@ -463,6 +910,7 @@ void FillFromTables(std::uintptr_t base, int set_id, WorldMapLoadNative* req) {
         req->y[row] = xy[icon * 2 + 1];
         const int bit = ModFlagGet(flag);
         req->revealed[row] = bit > 0 ? 1 : 0;
+        req->accessible[row] = ModFlagGet(visited[icon]) > 0 ? 1 : 0;
         req->picture[row] = icon;
 
         int extra_n = 0;
@@ -534,9 +982,7 @@ void OnWorldMapConfirm() {
         if (g_mod_wm_confirm_state) {
             *g_mod_wm_confirm_state = 0;
         }
-        LogInfo("OnWorldMapConfirm dest=0x%04X deny", req.map_id);
     } else {
-        LogInfo("OnWorldMapConfirm dest=0x%04X allow", req.map_id);
         WorldMapNotifyTravelStarted();
     }
 }
@@ -559,16 +1005,16 @@ void AfterAmapRowCount() {
     if (stock_draw < 0) {
         stock_draw = 0;
     }
-    if (stock_draw > 16) {
-        stock_draw = 16;
+    if (stock_draw > kSlots) {
+        stock_draw = kSlots;
     }
 
     const int set_id = g_apply_set_id;
-    if (set_id >= 0 && set_id < 4) {
-        auto* flags = reinterpret_cast<std::uint8_t*>(base + 0x201498u + set_id * 16 * 2);
-        std::uint8_t flag_bytes[32]{};
+    if (set_id >= 0 && set_id < kSets && g_flags) {
+        auto* flags = g_flags + set_id * kSlots * 2;
+        std::uint8_t flag_bytes[kSlots * 2]{};
         std::memcpy(flag_bytes, flags, sizeof(flag_bytes));
-        for (int s = stock_draw; s < 16; ++s) {
+        for (int s = stock_draw; s < kSlots; ++s) {
             if (!g_added_icon[s]) {
                 flag_bytes[s * 2] = 0;
                 flag_bytes[s * 2 + 1] = 0;
@@ -578,25 +1024,50 @@ void AfterAmapRowCount() {
     }
 
     int max_icon = stock_draw - 1;
-    for (int s = 0; s < 16; ++s) {
+    for (int s = 0; s < kSlots; ++s) {
         if (g_added_icon[s] && s > max_icon) {
             max_icon = s;
         }
     }
-    int edx = max_icon + 2;
-    if (edx < 2) {
-        edx = 2;
+    int count = max_icon + 1;
+    if (count < 1) {
+        count = 1;
     }
-    if (edx > 17) {
-        edx = 17;
+    if (count > kSlots) {
+        count = kSlots;
     }
-    const std::uint8_t force[7] = {0xBA, static_cast<std::uint8_t>(edx), 0, 0, 0, 0x90, 0x90};
-    WriteBytes(reinterpret_cast<void*>(base + 0x59C8Du), force, sizeof(force));
-    LogInfo("OnWorldMapLoad icon-count edx=%d stock_draw=%d max_icon=%d", edx, stock_draw, max_icon);
+    g_mod_wm_force_draw = count;
+    if (g_tables.captured) {
+        WriteBytes(reinterpret_cast<void*>(base + kWorldMapIconCountRva), g_tables.icon_count,
+                   kIconCountPatchSize);
+    }
 }
 
 extern "C" void ModAfterAmapRowCount() {
     AfterAmapRowCount();
+}
+
+void OnWorldMapCursorInit(int suggested) {
+    const auto base = ModuleBase();
+    if (base == 0) {
+        return;
+    }
+    std::uint8_t amap = 0;
+    SafeReadByte(base + kWorldMapAmapIndexRva, &amap);
+    int set_id = ReadSetId(base, static_cast<int>(amap));
+    if (set_id < 0 || set_id >= kSets) {
+        set_id = 0;
+    }
+    int icon = PickAccessibleStart(set_id, suggested);
+    if (icon < 0) {
+        icon = 0;
+    }
+    if (icon > 255) {
+        icon = 255;
+    }
+    const auto v = static_cast<std::uint8_t>(icon);
+    WriteBytes(reinterpret_cast<void*>(base + kWorldMapCursorIconRva), &v, 1);
+    WriteBytes(reinterpret_cast<void*>(base + kWorldMapCursorIconCopyRva), &v, 1);
 }
 
 void OnWorldMapLoad() {
@@ -606,7 +1077,15 @@ void OnWorldMapLoad() {
     }
     CaptureTables(base);
     ResetPictures();
+    if (g_tables.captured) {
+        WriteMem(reinterpret_cast<void*>(base + kWorldMapIconCountRva), g_tables.icon_count,
+                 kIconCountPatchSize);
+    }
     ClearWorldMapCustomPictures();
+    if (!InstallWideTables(base)) {
+        LogWarn("OnWorldMapLoad: 32-slot tables unavailable; stock 16-icon map only");
+        return;
+    }
 
     const int amap = ComputeAmapIndex(base);
     int set_id = ReadSetId(base, amap);
@@ -621,23 +1100,6 @@ void OnWorldMapLoad() {
     FillFromTables(base, set_id, &req);
     const WorldMapLoadNative before = req;
 
-    char line[256]{};
-    int used = 0;
-    for (int i = 0; i < req.count; ++i) {
-        const int n = std::snprintf(line + used, sizeof(line) - static_cast<std::size_t>(used),
-                                    used ? " %04X@i%d%s" : "%04X@i%d%s", req.map_id[i], req.slot[i],
-                                    req.revealed[i] ? "" : "?");
-        if (n < 0) {
-            break;
-        }
-        used += n;
-        if (used >= static_cast<int>(sizeof(line)) - 8) {
-            break;
-        }
-    }
-    LogInfo("OnWorldMapLoad set=%d amap=%d origin=%d n=%d %s", set_id, amap, req.origin_ctx,
-            req.count, line);
-
     if (RuntimeOnWorldMapLoad(&req) != 0) {
         return;
     }
@@ -645,8 +1107,7 @@ void OnWorldMapLoad() {
         return;
     }
     RestoreTables(base);
-    ApplyDests(base, set_id, req, before);
-    LogInfo("OnWorldMapLoad write set=%d n=%d", set_id, req.count);
+    ApplyDests(base, set_id, amap, req, before);
 }
 
 }  // namespace grandia_mod
@@ -657,6 +1118,10 @@ extern "C" void ModOnWorldMapConfirm() {
 
 extern "C" void ModOnWorldMapLoad() {
     grandia_mod::OnWorldMapLoad();
+}
+
+extern "C" void ModOnWorldMapCursorInit(int suggested) {
+    grandia_mod::OnWorldMapCursorInit(suggested);
 }
 
 #if defined(_M_IX86)
@@ -704,15 +1169,35 @@ extern "C" __declspec(naked) void ModWorldMapLoadDetour() {
     }
 }
 
+extern "C" __declspec(naked) void ModWmCursorConfirm() {
+    __asm {
+        add ecx, ecx
+        add ecx, ecx
+        push eax
+        add eax, dword ptr [g_mod_wm_cursor_base]
+        movsx ecx, byte ptr [eax + ecx*8]
+        pop eax
+        jmp dword ptr [g_mod_wm_cursor_confirm_resume]
+    }
+}
+
+extern "C" __declspec(naked) void ModWmCursorDest() {
+    __asm {
+        add ecx, ecx
+        add ecx, ecx
+        push eax
+        add eax, dword ptr [g_mod_wm_cursor_base]
+        mov al, byte ptr [eax + ecx*8]
+        add esp, 4
+        jmp dword ptr [g_mod_wm_cursor_dest_resume]
+    }
+}
+
 extern "C" __declspec(naked) void ModWorldMapIconUvDetour() {
     __asm {
         mov byte ptr [esi + 10h], 0
-        cmp edi, 16
+        cmp edi, 32
         jae wm_pic_stock
-        cmp byte ptr [g_mod_wm_custom + edi], 0
-        je wm_pic_remap
-        mov word ptr [esi + 16h], 10h
-    wm_pic_remap:
         movzx eax, byte ptr [g_mod_wm_picture + edi]
         cmp al, 0FFh
         je wm_pic_stock
@@ -741,10 +1226,11 @@ extern "C" __declspec(naked) void ModWorldMapIconUvDetour() {
         call WorldMapOnIconSubmit
         mov esp, dword ptr [esp + 28]
         popad
-        cmp edi, 16
-        jae wm_pic_stock_draw
+        cmp edi, 32
+        jae wm_pic_skip_stock
         cmp byte ptr [g_mod_wm_custom + edi], 0
         je wm_pic_stock_draw
+    wm_pic_skip_stock:
         jmp dword ptr [g_mod_wm_pic_skip]
     wm_pic_stock_draw:
         jmp dword ptr [g_mod_wm_pic_resume]
@@ -766,6 +1252,57 @@ extern "C" __declspec(naked) void ModWorldMapAmapRowsDetour() {
         mov esp, dword ptr [esp]
         popad
         jmp dword ptr [g_mod_wm_rows_resume]
+    }
+}
+
+extern "C" __declspec(naked) void ModWorldMapCursorInitDetour() {
+    __asm {
+        pushad
+        movzx eax, al
+        mov ecx, esp
+        and esp, 0FFFFFFF0h
+        sub esp, 16
+        mov dword ptr [esp + 12], ecx
+        mov dword ptr [esp], eax
+        call ModOnWorldMapCursorInit
+        mov esp, dword ptr [esp + 12]
+        popad
+        jmp dword ptr [g_mod_wm_cursor_init_resume]
+    }
+}
+
+extern "C" __declspec(naked) void ModWmIconLoopStart() {
+    __asm {
+        mov dword ptr [g_mod_wm_icon_loop_phase], 1
+        cmp dword ptr [g_mod_wm_force_draw], 0
+        je wm_loop_keep
+        mov eax, dword ptr [g_mod_wm_force_draw]
+        mov dword ptr [ebp - 18h], eax
+    wm_loop_keep:
+        xor bh, bh
+        xor edi, edi
+        test eax, eax
+        jmp dword ptr [g_mod_wm_loop_resume]
+    }
+}
+
+extern "C" __declspec(naked) void ModWmIconLoopEnd() {
+    __asm {
+        mov dword ptr [g_mod_wm_icon_loop_phase], 2
+        pushad
+        mov eax, esp
+        and esp, 0FFFFFFF0h
+        sub esp, 16
+        mov dword ptr [esp], eax
+        call WorldMapDrawOverlaysAfterIcons
+        mov esp, dword ptr [esp]
+        popad
+        pop edi
+        pop esi
+        pop ebx
+        mov esp, ebp
+        pop ebp
+        ret
     }
 }
 
@@ -815,6 +1352,9 @@ bool InstallWorldMapHook() {
     }
 
     CaptureTables(base);
+    if (!InstallWideTables(base)) {
+        LogWarn("OnWorldMapLoad 32-slot tables not installed");
+    }
     g_wm_load_tramp_mem = MakeTrampoline(load, kLoadPatchSize, load + kLoadPatchSize);
     if (!g_wm_load_tramp_mem) {
         LogWarn("OnWorldMapLoad trampoline alloc failed");
@@ -861,6 +1401,47 @@ bool InstallWorldMapHook() {
         LogWarn("AMAP row-count write bytes mismatch at +0x%X",
                 static_cast<unsigned>(kWorldMapAmapRowsWriteRva));
     }
+
+    auto* cursor_init = reinterpret_cast<std::uint8_t*>(base + kWorldMapCursorInitRva);
+    if (IsExecutableAddress(cursor_init) && cursor_init[0] == 0xA2) {
+        g_mod_wm_cursor_init_resume = reinterpret_cast<void*>(base + kWorldMapCursorInitResumeRva);
+        if (WriteJump(cursor_init, reinterpret_cast<void*>(&ModWorldMapCursorInitDetour),
+                      g_wm_cursor_init_original, 5)) {
+            g_wm_cursor_init_site = cursor_init;
+            LogInfo("OnWorldMapLoad cursor-start hook at +0x%X",
+                    static_cast<unsigned>(kWorldMapCursorInitRva));
+        }
+    } else {
+        LogWarn("world-map cursor-start bytes mismatch at +0x%X",
+                static_cast<unsigned>(kWorldMapCursorInitRva));
+    }
+
+    auto* loop_start = reinterpret_cast<std::uint8_t*>(base + kWorldMapIconLoopStartRva);
+    if (IsExecutableAddress(loop_start) && loop_start[0] == 0x32 && loop_start[1] == 0xFF) {
+        g_mod_wm_loop_resume = reinterpret_cast<void*>(base + kWorldMapIconLoopStartResumeRva);
+        if (WriteJump(loop_start, reinterpret_cast<void*>(&ModWmIconLoopStart),
+                      g_wm_loop_start_original, 6)) {
+            g_wm_loop_start_site = loop_start;
+            LogInfo("OnWorldMapLoad icon-loop count hook at +0x%X",
+                    static_cast<unsigned>(kWorldMapIconLoopStartRva));
+        }
+    } else {
+        LogWarn("world-map icon-loop start bytes mismatch at +0x%X",
+                static_cast<unsigned>(kWorldMapIconLoopStartRva));
+    }
+
+    auto* loop_end = reinterpret_cast<std::uint8_t*>(base + kWorldMapIconLoopEndRva);
+    if (IsExecutableAddress(loop_end) && loop_end[0] == 0x5F) {
+        if (WriteJump(loop_end, reinterpret_cast<void*>(&ModWmIconLoopEnd), g_wm_loop_end_original,
+                      7)) {
+            g_wm_loop_end_site = loop_end;
+            LogInfo("OnWorldMapLoad icon-loop end overlay at +0x%X",
+                    static_cast<unsigned>(kWorldMapIconLoopEndRva));
+        }
+    } else {
+        LogWarn("world-map icon-loop end bytes mismatch at +0x%X",
+                static_cast<unsigned>(kWorldMapIconLoopEndRva));
+    }
     return true;
 #endif
 }
@@ -868,7 +1449,7 @@ bool InstallWorldMapHook() {
 void RemoveWorldMapHook() {
     const auto base = ModuleBase();
     if (base != 0) {
-        RestoreTables(base);
+        RemoveWideTables(base);
     }
     if (g_wm_site) {
         RestoreBytes(g_wm_site, g_wm_original, kPatchSize);
@@ -886,9 +1467,24 @@ void RemoveWorldMapHook() {
         RestoreBytes(g_wm_rows_site, g_wm_rows_original, 5);
         g_wm_rows_site = nullptr;
     }
+    if (g_wm_cursor_init_site) {
+        RestoreBytes(g_wm_cursor_init_site, g_wm_cursor_init_original, 5);
+        g_wm_cursor_init_site = nullptr;
+    }
+    if (g_wm_loop_start_site) {
+        RestoreBytes(g_wm_loop_start_site, g_wm_loop_start_original, 6);
+        g_wm_loop_start_site = nullptr;
+    }
+    if (g_wm_loop_end_site) {
+        RestoreBytes(g_wm_loop_end_site, g_wm_loop_end_original, 7);
+        g_wm_loop_end_site = nullptr;
+    }
+    g_mod_wm_force_draw = 0;
+    g_mod_wm_loop_resume = nullptr;
     g_mod_wm_pic_resume = nullptr;
     g_mod_wm_pic_skip = nullptr;
     g_mod_wm_rows_resume = nullptr;
+    g_mod_wm_cursor_init_resume = nullptr;
     if (g_wm_load_tramp_mem) {
         VirtualFree(g_wm_load_tramp_mem, 0, MEM_RELEASE);
         g_wm_load_tramp_mem = nullptr;
@@ -912,6 +1508,11 @@ constexpr std::uintptr_t kMapTravelResumeRva = 0x614D6u;
 constexpr std::uintptr_t kSetupTravelRva = 0x72F93u;
 constexpr std::size_t kSetupTravelPatch = 7u;
 constexpr std::uintptr_t kSetupTravelResumeRva = 0x72F9Au;
+constexpr std::uintptr_t kClearAmapRva = 0x58330u;
+constexpr std::uintptr_t kOpenAmapCallRva = 0x77618u;
+constexpr std::uintptr_t kOpenAmap2CallRva = 0x7774Du;
+constexpr std::uintptr_t kOpenAmapSkipRva = 0x77891u;
+constexpr std::size_t kOpenAmapPatch = 5u;
 constexpr std::uintptr_t kMapObjPtrRva = 0x23FA94u;
 constexpr std::uintptr_t kPartyPtrRva = 0x31CD28u;
 constexpr std::uintptr_t kSetupTravelRet = 0x7301Cu;
@@ -921,7 +1522,10 @@ void* g_map_travel_site = nullptr;
 std::uint8_t g_map_travel_original[8]{};
 void* g_setup_travel_site = nullptr;
 std::uint8_t g_setup_travel_original[8]{};
-int g_map_travel_logs = 0;
+void* g_open_amap_site = nullptr;
+std::uint8_t g_open_amap_original[8]{};
+void* g_open_amap2_site = nullptr;
+std::uint8_t g_open_amap2_original[8]{};
 
 std::uint16_t ReadCurrentMapId() {
     const auto base = grandia_mod::ModuleBase();
@@ -982,11 +1586,6 @@ int RaiseMapTravel(std::uint32_t dest, std::uint32_t spawn, int kind) {
     }
     g_mod_map_travel_dest = req.dest;
     g_mod_map_travel_spawn = static_cast<std::uint32_t>(req.spawn) & 0xFFFFu;
-    if (g_map_travel_logs < 16) {
-        ++g_map_travel_logs;
-        grandia_mod::LogInfo("OnMapTravel from=0x%04X dest=0x%04X spawn=%d kind=%d allow=%d", req.from,
-                             req.dest, req.spawn, req.kind, req.allow);
-    }
     return req.allow ? 1 : 0;
 }
 
@@ -995,11 +1594,24 @@ int RaiseMapTravel(std::uint32_t dest, std::uint32_t spawn, int kind) {
 extern "C" {
 void* g_mod_map_travel_resume = nullptr;
 void* g_mod_setup_travel_resume = nullptr;
+void* g_mod_map_travel_fn = nullptr;
+void* g_mod_clear_amap = nullptr;
+void* g_mod_open_amap_resume = nullptr;
+void* g_mod_open_amap4_resume = nullptr;
+void* g_mod_open_amap6_resume = nullptr;
+void* g_mod_open_amap_skip = nullptr;
 std::uint32_t g_mod_map_travel_dest = 0;
 std::uint32_t g_mod_map_travel_spawn = 0;
+volatile int g_mod_skip_map_travel = 0;
+volatile int g_mod_open_amap_rc = 0;
 }
 
 extern "C" int __cdecl ModOnMapTravel(std::uint32_t dest, std::uint32_t spawn, std::uint32_t ret) {
+    if (g_mod_skip_map_travel) {
+        g_mod_map_travel_dest = dest;
+        g_mod_map_travel_spawn = spawn;
+        return 1;
+    }
     if (grandia_mod::CallerRva(ret) == kSetupTravelRet) {
         g_mod_map_travel_dest = dest;
         g_mod_map_travel_spawn = spawn;
@@ -1018,6 +1630,19 @@ extern "C" int __cdecl ModOnFieldTravel(std::uint32_t dest, std::uint32_t spawn)
         ReleasePartyWalk();
     }
     return allow;
+}
+
+// 0 = stay, 1 = open area map, 2 = dest-load Destination.
+extern "C" int __cdecl ModOnOpenAmapTravel(unsigned node) {
+    const int allow = RaiseMapTravel(0, node, 3);
+    if (allow == 0) {
+        ReleasePartyWalk();
+        return 0;
+    }
+    if (g_mod_map_travel_dest != 0) {
+        return 2;
+    }
+    return 1;
 }
 
 #if defined(_M_IX86)
@@ -1044,6 +1669,62 @@ extern "C" __declspec(naked) void ModSetupTravelDetour() {
         popad
         mov word ptr [edi], 0
         and byte ptr [edx + 3], 0x80
+        pop edi
+        pop esi
+        pop ebx
+        mov esp, ebp
+        pop ebp
+        ret
+    }
+}
+
+extern "C" void ModOpenAmapShared();
+extern "C" void ModOpenAmap4Detour();
+extern "C" void ModOpenAmap6Detour();
+
+extern "C" __declspec(naked) void ModOpenAmap4Detour() {
+    __asm {
+        pushad
+        mov eax, dword ptr [g_mod_open_amap4_resume]
+        mov dword ptr [g_mod_open_amap_resume], eax
+        jmp ModOpenAmapShared
+    }
+}
+
+extern "C" __declspec(naked) void ModOpenAmap6Detour() {
+    __asm {
+        pushad
+        mov eax, dword ptr [g_mod_open_amap6_resume]
+        mov dword ptr [g_mod_open_amap_resume], eax
+        jmp ModOpenAmapShared
+    }
+}
+
+extern "C" __declspec(naked) void ModOpenAmapShared() {
+    __asm {
+        movzx eax, byte ptr [esi + 5]
+        push eax
+        call ModOnOpenAmapTravel
+        add esp, 4
+        mov dword ptr [g_mod_open_amap_rc], eax
+        popad
+        cmp dword ptr [g_mod_open_amap_rc], 0
+        je open_amap_cancel
+        cmp dword ptr [g_mod_open_amap_rc], 2
+        je open_amap_redirect
+        call dword ptr [g_mod_clear_amap]
+        jmp dword ptr [g_mod_open_amap_resume]
+    open_amap_cancel:
+        jmp dword ptr [g_mod_open_amap_skip]
+    open_amap_redirect:
+        mov eax, dword ptr [edi + 4]
+        mov word ptr [edi], 0
+        and byte ptr [eax + 3], 0x80
+        mov ecx, dword ptr [g_mod_map_travel_dest]
+        mov edx, dword ptr [g_mod_map_travel_spawn]
+        mov dword ptr [g_mod_skip_map_travel], 1
+        call dword ptr [g_mod_map_travel_fn]
+        mov dword ptr [g_mod_skip_map_travel], 0
         pop edi
         pop esi
         pop ebx
@@ -1117,6 +1798,59 @@ bool InstallMapTravelHook() {
     }
     g_setup_travel_site = setup;
     LogInfo("OnMapTravel field setup hook at +0x72F93");
+
+    g_mod_map_travel_fn = reinterpret_cast<void*>(base + kMapTravelRva);
+    g_mod_clear_amap = reinterpret_cast<void*>(base + kClearAmapRva);
+    auto* skip = reinterpret_cast<std::uint8_t*>(base + kOpenAmapSkipRva);
+    const std::uint8_t skip_expect[] = {0x8B, 0x47, 0x04};
+    if (!IsExecutableAddress(skip) || !BytesMatch(skip, skip_expect, 3)) {
+        LogWarn("OnMapTravel open_amap skip +0x%X site mismatch",
+                static_cast<unsigned>(kOpenAmapSkipRva));
+        return true;
+    }
+    g_mod_open_amap_skip = skip;
+
+    auto install_open_amap = [&](std::uintptr_t rva, void* detour, void** site_out,
+                                 std::uint8_t* original, void** resume_out) -> bool {
+        auto* call = reinterpret_cast<std::uint8_t*>(base + rva);
+        if (!IsExecutableAddress(call) || call[0] != 0xE8) {
+            return false;
+        }
+        const auto rel = *reinterpret_cast<std::int32_t*>(call + 1);
+        const auto target = reinterpret_cast<std::uintptr_t>(call + 5 + rel);
+        if (target != base + kClearAmapRva) {
+            return false;
+        }
+        *resume_out = call + kOpenAmapPatch;
+        if (!WriteJump(call, detour, original, kOpenAmapPatch)) {
+            return false;
+        }
+        *site_out = call;
+        return true;
+    };
+
+    if (!install_open_amap(kOpenAmapCallRva, reinterpret_cast<void*>(&ModOpenAmap4Detour),
+                           &g_open_amap_site, g_open_amap_original, &g_mod_open_amap4_resume) ||
+        !install_open_amap(kOpenAmap2CallRva, reinterpret_cast<void*>(&ModOpenAmap6Detour),
+                           &g_open_amap2_site, g_open_amap2_original, &g_mod_open_amap6_resume)) {
+        if (g_open_amap_site) {
+            RestoreBytes(g_open_amap_site, g_open_amap_original, kOpenAmapPatch);
+            g_open_amap_site = nullptr;
+        }
+        if (g_open_amap2_site) {
+            RestoreBytes(g_open_amap2_site, g_open_amap2_original, kOpenAmapPatch);
+            g_open_amap2_site = nullptr;
+        }
+        g_mod_open_amap4_resume = nullptr;
+        g_mod_open_amap6_resume = nullptr;
+        LogWarn("OnMapTravel open_amap +0x%X / +0x%X site mismatch",
+                static_cast<unsigned>(kOpenAmapCallRva),
+                static_cast<unsigned>(kOpenAmap2CallRva));
+        return true;
+    }
+    LogInfo("OnMapTravel world-map exit hook at +0x%X / +0x%X",
+            static_cast<unsigned>(kOpenAmapCallRva),
+            static_cast<unsigned>(kOpenAmap2CallRva));
     return true;
 #endif
 }
@@ -1129,6 +1863,14 @@ void RemoveMapTravelHook() {
     if (g_setup_travel_site) {
         RestoreBytes(g_setup_travel_site, g_setup_travel_original, kSetupTravelPatch);
         g_setup_travel_site = nullptr;
+    }
+    if (g_open_amap_site) {
+        RestoreBytes(g_open_amap_site, g_open_amap_original, kOpenAmapPatch);
+        g_open_amap_site = nullptr;
+    }
+    if (g_open_amap2_site) {
+        RestoreBytes(g_open_amap2_site, g_open_amap2_original, kOpenAmapPatch);
+        g_open_amap2_site = nullptr;
     }
 }
 

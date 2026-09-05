@@ -27,4 +27,5 @@ internal interface INativeGame
     int OverlaySetPanel(string joined, uint[] rgbs, int count);
     int OverlayClearPanel();
     int OverlayPanelActive();
+    int PartyWalkGet(out int x, out int y, out int z);
 }

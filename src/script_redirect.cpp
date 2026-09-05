@@ -1,6 +1,7 @@
 #include "script_redirect.h"
 
 #include "clr_host.h"
+#include "dialogue.h"
 #include "hook_util.h"
 #include "log.h"
 #include "map_apply.h"
@@ -25,24 +26,6 @@ std::uint8_t g_script_original[8]{};
 void* g_hook_site = nullptr;
 std::uint8_t g_hook_original[16]{};
 void* g_hook_tramp_mem = nullptr;
-int g_redirect_logs = 0;
-int g_lookup_logs = 0;
-
-void LogRedirect(const char* tag, unsigned id, unsigned ptr) {
-    if (g_redirect_logs >= 16) {
-        return;
-    }
-    ++g_redirect_logs;
-    LogInfo("redirect %s id=0x%X ptr=0x%X stem=%s", tag, id, ptr, CurrentMapStem());
-}
-
-void LogLookup(unsigned id) {
-    if (g_lookup_logs >= 32) {
-        return;
-    }
-    ++g_lookup_logs;
-    LogInfo("script lookup id=0x%X stem=%s", id, CurrentMapStem());
-}
 
 }  // namespace
 
@@ -51,16 +34,16 @@ extern "C" void* g_mod_script_lookup_resume = nullptr;
 extern "C" void* g_mod_call_hook_tramp = nullptr;
 
 extern "C" std::uint32_t __cdecl ModTryScriptRedirect(std::uint32_t script_id) {
-    LogLookup(script_id);
     std::uint32_t ip = 0;
     const int rc = RuntimeOnScriptLookup(CurrentMapStem(), static_cast<std::uint16_t>(script_id), &ip);
     if (rc < 0) {
         return 0xFFFFFFFFu;
     }
     if (rc > 0 && ip != 0) {
-        LogRedirect("script", script_id, ip);
+        NoteScriptArm(static_cast<std::uint16_t>(script_id), ip);
         return ip;
     }
+    NoteScriptArm(static_cast<std::uint16_t>(script_id), 0);
     return 0;
 }
 
@@ -74,7 +57,6 @@ extern "C" int __cdecl ModTryCallHook(int table, std::uint32_t hook_id) {
     if (rc <= 0 || row == 0) {
         return 0;
     }
-    LogRedirect("hook", hook_id, row);
     using DispatchFn = void(__fastcall*)(int, void*);
     auto* fn = reinterpret_cast<DispatchFn>(ModuleBase() + kHookDispatchRva);
     if (!fn) {

@@ -6,11 +6,18 @@
     <Configuration Condition="'$(Configuration)' == ''">Release</Configuration>
     <AppOutDir>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\bin\$(Configuration)\net8.0-windows\'))</AppOutDir>
     <RepoRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\..\'))</RepoRoot>
+    <!-- MSI version is Major.Minor.Build (max 255.255.65535). 1.{yy}.{dayOfYear*100+hour}
+         is unique per hour so a rebuild upgrades instead of Repair. -->
+    <MsiVersion>1.$([System.DateTime]::UtcNow.ToString('yy')).$([MSBuild]::Add($([MSBuild]::Multiply($([System.DateTime]::UtcNow.DayOfYear), 100)), $([System.DateTime]::UtcNow.Hour)))</MsiVersion>
+    <DefineConstants>$(DefineConstants);MsiVersion=$(MsiVersion)</DefineConstants>
+    <!-- ICE61 complains because AllowSameVersionUpgrades sets MaxVersion = this Version. -->
+    <SuppressIces>ICE61</SuppressIces>
   </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\GrandiaModloader.csproj" />
     <BindPath Include="$(AppOutDir)" BindName="app" />
+    <PackageReference Include="WixToolset.UI.wixext" Version="5.0.2" />
   </ItemGroup>
 
   <Target Name="StageNativePayload" BeforeTargets="BeforeBuild">
@@ -32,5 +39,16 @@
     </ItemGroup>
     <Copy SourceFiles="@(_StageFile)" DestinationFolder="$(AppOutDir)" SkipUnchangedFiles="true"
           Condition="'@(_StageFile)' != ''" />
+    <ItemGroup>
+      <_TemplateFile Include="$(RepoRoot)templates\**\*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_TemplateFile)"
+          DestinationFiles="@(_TemplateFile->'$(AppOutDir)templates\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true"
+          Condition="'@(_TemplateFile)' != ''" />
+    <Copy SourceFiles="$(MSBuildThisFileDirectory)..\app.ico"
+          DestinationFiles="$(AppOutDir)templates\GrandiaMod\__TemplateIcon.ico"
+          SkipUnchangedFiles="true"
+          Condition="Exists('$(MSBuildThisFileDirectory)..\app.ico')" />
   </Target>
 </Project>

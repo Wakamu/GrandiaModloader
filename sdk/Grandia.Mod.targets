@@ -1,11 +1,22 @@
 <Project>
   <!-- Assemble scripts/*.asm, embed maps/scripts bins, and embed assets/** (PNGs, …). -->
   <PropertyGroup>
+    <GrandiaModloaderDir Condition="'$(GrandiaModloaderDir)' == ''">$(GRANDIA_MODLOADER)</GrandiaModloaderDir>
+    <GrandiaModloaderDir Condition="'$(GrandiaModloaderDir)' == ''">$([MSBuild]::GetRegistryValueFromView('HKEY_LOCAL_MACHINE\SOFTWARE\GrandiaModloader', 'InstallDir', null, RegistryView.Registry32, RegistryView.Registry64))</GrandiaModloaderDir>
+    <GrandiaModloaderDir Condition="'$(GrandiaModloaderDir)' == '' and Exists('C:\Program Files (x86)\Grandia Modloader\Grandia.Sdk.dll')">C:\Program Files (x86)\Grandia Modloader</GrandiaModloaderDir>
+    <GrandiaModloaderDir Condition="'$(GrandiaModloaderDir)' == '' and Exists('C:\Program Files\Grandia Modloader\Grandia.Sdk.dll')">C:\Program Files\Grandia Modloader</GrandiaModloaderDir>
+    <GrandiaModloaderDir Condition="'$(GrandiaModloaderDir)' == '' and Exists('$(MSBuildThisFileDirectory)Grandia.Sdk.dll')">$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)'))</GrandiaModloaderDir>
+    <GrandiaSdkDll Condition="'$(GrandiaSdkDll)' == '' and Exists('$(GrandiaModloaderDir)\Grandia.Sdk.dll')">$(GrandiaModloaderDir)\Grandia.Sdk.dll</GrandiaSdkDll>
+    <GrandiaSdkDll Condition="'$(GrandiaSdkDll)' == '' and Exists('$(MSBuildThisFileDirectory)Grandia.Sdk.dll')">$(MSBuildThisFileDirectory)Grandia.Sdk.dll</GrandiaSdkDll>
+    <GrandiaSdkDll Condition="'$(GrandiaSdkDll)' == '' and Exists('$(MSBuildThisFileDirectory)bin\Release\net8.0\Grandia.Sdk.dll')">$(MSBuildThisFileDirectory)bin\Release\net8.0\Grandia.Sdk.dll</GrandiaSdkDll>
     <GrandiaFieldPatch Condition="'$(GrandiaFieldPatch)' == '' and Exists('$(MSBuildThisFileDirectory)..\CMakeLists.txt')">$(MSBuildThisFileDirectory)..</GrandiaFieldPatch>
     <GrandiaFieldPatch Condition="'$(GrandiaFieldPatch)' == ''">$(MSBuildThisFileDirectory)</GrandiaFieldPatch>
+    <FieldToolsExe Condition="'$(FieldToolsExe)' == '' and Exists('$(GrandiaModloaderDir)\field_tools\field_tools.exe')">$(GrandiaModloaderDir)\field_tools\field_tools.exe</FieldToolsExe>
     <FieldToolsExe Condition="'$(FieldToolsExe)' == '' and Exists('$(MSBuildThisFileDirectory)field_tools\field_tools.exe')">$(MSBuildThisFileDirectory)field_tools\field_tools.exe</FieldToolsExe>
     <FieldToolsExe Condition="'$(FieldToolsExe)' == '' and Exists('$(GrandiaFieldPatch)\vendor\field_tools\field_tools.exe')">$(GrandiaFieldPatch)\vendor\field_tools\field_tools.exe</FieldToolsExe>
     <AssembleModScripts Condition="'$(AssembleModScripts)' == ''">true</AssembleModScripts>
+    <CopyModToLoader Condition="'$(CopyModToLoader)' == ''">true</CopyModToLoader>
+    <GrandiaModsDir Condition="'$(GrandiaModsDir)' == ''">$(APPDATA)\GrandiaModloader\mods</GrandiaModsDir>
   </PropertyGroup>
 
   <ItemGroup>
@@ -37,5 +48,13 @@
         <LogicalName>scripts/%(Filename)%(Extension)</LogicalName>
       </EmbeddedResource>
     </ItemGroup>
+  </Target>
+
+  <Target Name="CopyModToLoader" AfterTargets="Build"
+          Condition="'$(CopyModToLoader)' == 'true' and '$(TargetPath)' != ''">
+    <MakeDir Directories="$(GrandiaModsDir)" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(GrandiaModsDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(TargetDir)$(TargetName).pdb" DestinationFolder="$(GrandiaModsDir)" SkipUnchangedFiles="true"
+          Condition="Exists('$(TargetDir)$(TargetName).pdb')" />
   </Target>
 </Project>

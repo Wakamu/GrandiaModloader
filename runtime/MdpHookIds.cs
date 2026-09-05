@@ -53,6 +53,16 @@ internal static class MdpHookIds
         return ids;
     }
 
+    internal static byte[]? TrySlice(byte[]? mdp, int index)
+    {
+        if (mdp is not { Length: > 0 } || !TrySection(mdp, index, out var off, out var len) || len <= 0)
+        {
+            return null;
+        }
+
+        return mdp.AsSpan(off, Math.Min(len, mdp.Length - off)).ToArray();
+    }
+
     internal static bool TrySection(byte[] mdp, int index, out int off, out int len)
     {
         off = 0;
