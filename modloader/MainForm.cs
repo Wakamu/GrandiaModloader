@@ -24,10 +24,19 @@ public sealed class MainForm : Form
     private readonly Button _up = new() { Text = "Move up", AutoSize = true };
     private readonly Button _down = new() { Text = "Move down", AutoSize = true };
     private readonly Button _settings = new() { Text = "Settings", AutoSize = true };
+    private readonly Button _updates = new() { Text = "Check for updates", AutoSize = true };
     private readonly Button _launchBtn = new() { Text = "Launch Grandia", AutoSize = true };
     private readonly Button _cancel = new() { Text = "Cancel", AutoSize = true, Enabled = false };
     private readonly RichTextBox _log = new() { ReadOnly = true, Dock = DockStyle.Fill, Font = new Font("Consolas", 9f) };
     private readonly Label _status = new() { AutoSize = true, Dock = DockStyle.Fill };
+    private readonly LinkLabel _updateLink = new()
+    {
+        Text = "",
+        AutoSize = true,
+        Visible = false,
+        LinkBehavior = LinkBehavior.HoverUnderline,
+    };
+    private UpdateCheckResult? _update;
 
     public MainForm()
     {
@@ -37,7 +46,7 @@ public sealed class MainForm : Form
         _launch = new LaunchService(_store);
         _launch.Log += msg => BeginInvoke(() => AppendLog(msg));
 
-        Text = "Grandia Modloader";
+        Text = $"Grandia Modloader {AppVersion.Display}";
         Width = 860;
         Height = 640;
         MinimumSize = new Size(720, 480);
@@ -56,6 +65,15 @@ public sealed class MainForm : Form
         _up.Click += (_, _) => MoveSelected(-1);
         _down.Click += (_, _) => MoveSelected(1);
         _settings.Click += (_, _) => OpenSettings();
+        _updates.Click += async (_, _) => await CheckUpdatesAsync(prompt: true);
+        _updateLink.LinkClicked += (_, _) => OpenRelease(_update);
+        Shown += async (_, _) =>
+        {
+            if (_store.Config.CheckForUpdates)
+            {
+                await CheckUpdatesAsync(prompt: false);
+            }
+        };
         _launchBtn.Click += async (_, _) => await LaunchAsync();
         _cancel.Click += (_, _) => _launch.Cancel();
         _mods.ItemChecked += ModsOnItemChecked;
@@ -88,7 +106,7 @@ public sealed class MainForm : Form
 
         var title = new Label
         {
-            Text = "Grandia Modloader",
+            Text = $"Grandia Modloader {AppVersion.Display}",
             Font = new Font("Georgia", 18f, FontStyle.Bold),
             AutoSize = true,
             Margin = new Padding(0, 0, 0, 8),
@@ -106,6 +124,7 @@ public sealed class MainForm : Form
         buttons.Controls.Add(_up);
         buttons.Controls.Add(_down);
         buttons.Controls.Add(_settings);
+        buttons.Controls.Add(_updates);
         buttons.Controls.Add(_launchBtn);
         buttons.Controls.Add(_cancel);
 
@@ -113,6 +132,7 @@ public sealed class MainForm : Form
         header.Controls.Add(title);
         header.Controls.Add(buttons);
         header.Controls.Add(_status);
+        header.Controls.Add(_updateLink);
 
         root.Controls.Add(header, 0, 0);
         root.Controls.Add(_mods, 0, 1);
@@ -273,6 +293,7 @@ public sealed class MainForm : Form
         _up.Enabled = !busy;
         _down.Enabled = !busy;
         _settings.Enabled = !busy;
+        _updates.Enabled = !busy;
     }
 
     private void UpdateStatus()
@@ -281,7 +302,111 @@ public sealed class MainForm : Form
         var mode = string.Equals(cfg.LaunchMode, "exe", StringComparison.OrdinalIgnoreCase) ? "grandia.exe" : "Steam";
         var enabled = _store.ListMods().Count(m => m.Enabled);
         _status.ForeColor = UiTheme.Muted;
-        _status.Text = $"{enabled} enabled · launch via {mode} · mods {Paths.ModsDir}";
+        _status.Text = $"{AppVersion.Display} · {enabled} enabled · launch via {mode} · mods {Paths.ModsDir}";
+    }
+
+    private async Task CheckUpdatesAsync(bool prompt)
+    {
+        _updates.Enabled = false;
+        try
+        {
+            var result = await UpdateChecker.CheckAsync();
+            if (IsDisposed)
+            {
+                return;
+            }
+
+            _update = result;
+            switch (result.Status)
+            {
+                case UpdateCheckStatus.Available:
+                    _updateLink.Text = $"Update {result.Remote} available — open GitHub";
+                    _updateLink.Visible = true;
+                    AppendLog($"Update {result.Remote} available (this build is {AppVersion.Display}).");
+                    if (prompt || ShouldPrompt(result))
+                    {
+                        PromptUpdate(result, prompt);
+                    }
+
+                    break;
+                case UpdateCheckStatus.UpToDate:
+                    _updateLink.Visible = false;
+                    AppendLog($"Up to date ({AppVersion.Display}).");
+                    if (prompt)
+                    {
+                        MessageBox.Show(this, $"You're on {AppVersion.Display}, the latest GitHub release.",
+                            "Updates", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+
+                    break;
+                case UpdateCheckStatus.NoReleases:
+                    _updateLink.Visible = false;
+                    AppendLog("No GitHub releases yet.");
+                    if (prompt)
+                    {
+                        MessageBox.Show(this,
+                            $"You're on {AppVersion.Display}. There are no GitHub releases to compare yet.",
+                            "Updates", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+
+                    break;
+                default:
+                    _updateLink.Visible = false;
+                    AppendLog($"Update check failed: {result.Error}");
+                    if (prompt)
+                    {
+                        MessageBox.Show(this, result.Error ?? "Could not reach GitHub.",
+                            "Updates", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    }
+
+                    break;
+            }
+        }
+        finally
+        {
+            if (!IsDisposed && !_launch.IsBusy)
+            {
+                _updates.Enabled = true;
+            }
+        }
+    }
+
+    private bool ShouldPrompt(UpdateCheckResult result)
+    {
+        var skip = _store.Config.SkipRelease;
+        return !string.IsNullOrWhiteSpace(result.Remote) &&
+               !string.Equals(skip, result.Remote, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void PromptUpdate(UpdateCheckResult result, bool fromButton)
+    {
+        var text = $"Grandia Modloader {result.Remote} is on GitHub.{Environment.NewLine}" +
+                   $"This build is {AppVersion.Display}.{Environment.NewLine}{Environment.NewLine}" +
+                   "Yes = open the release page. Cancel = skip this version.";
+        var choice = MessageBox.Show(this, text, "Update available",
+            fromButton ? MessageBoxButtons.YesNo : MessageBoxButtons.YesNoCancel,
+            MessageBoxIcon.Information);
+        if (choice == DialogResult.Yes)
+        {
+            OpenRelease(result);
+            return;
+        }
+
+        if (!fromButton && choice == DialogResult.Cancel)
+        {
+            _store.Config.SkipRelease = result.Remote ?? "";
+            _store.SaveConfig();
+        }
+    }
+
+    private static void OpenRelease(UpdateCheckResult? result)
+    {
+        var url = result?.Url ?? AppVersion.ReleasesUrl;
+        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = url,
+            UseShellExecute = true,
+        });
     }
 
     private void AppendLog(string message)

@@ -86,6 +86,17 @@ internal static class UiTheme
                 numeric.ForeColor = Text;
                 numeric.BorderStyle = BorderStyle.FixedSingle;
                 break;
+            case LinkLabel link:
+                link.LinkColor = Accent;
+                link.ActiveLinkColor = Text;
+                link.VisitedLinkColor = Accent;
+                link.ForeColor = Accent;
+                link.BackColor = Color.Transparent;
+                break;
+            case CheckBox box:
+                box.ForeColor = Text;
+                box.BackColor = Color.Transparent;
+                break;
             case Label label:
                 label.ForeColor = label.Font.Size >= 16f ? Accent : Text;
                 label.BackColor = Color.Transparent;

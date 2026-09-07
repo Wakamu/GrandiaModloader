@@ -21,6 +21,12 @@ public sealed class AppConfig
     /// <summary>Enabled state keyed by mod id (DLL file name without extension).</summary>
     public Dictionary<string, bool> ModEnabled { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>Query GitHub releases on startup. Independent of MSI versioning.</summary>
+    public bool CheckForUpdates { get; set; } = true;
+
+    /// <summary>Release tag the user skipped (e.g. 1.1.0). Empty = none.</summary>
+    public string SkipRelease { get; set; } = "";
+
     public static string DefaultConfigPath()
     {
         var portable = Path.Combine(Paths.AppDir, "config.json");
@@ -77,6 +83,7 @@ public sealed class AppConfig
 
         ModOrder ??= [];
         ModEnabled ??= new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        SkipRelease ??= "";
     }
 
     public static JsonSerializerOptions JsonOptions() =>
