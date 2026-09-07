@@ -11,6 +11,13 @@ public sealed class ItemEvent
     private int _sellPrice;
     private bool _sellExplicit;
 
+    private string? _name;
+    private string? _shortName;
+    private string? _description;
+    private bool _nameSet;
+    private bool _shortNameSet;
+    private bool _descriptionSet;
+
     public ItemEvent(int id, int cost, int icon, int useStatus)
     {
         Id = (Item)id;
@@ -87,6 +94,76 @@ public sealed class ItemEvent
 
     /// <summary>u16 at record+25.</summary>
     public int Para4Post { get; set; }
+
+    /// <summary>
+    /// u8 at record+8 (weapon class: 1 dagger … 6 bow; Lump of Coal is 0).
+    /// Seeded from the live row; assign to change. Unseeded 0 wipes class.
+    /// </summary>
+    public int Unknown8 { get; set; }
+
+    /// <summary>u8 at record+11.</summary>
+    public int Unknown11 { get; set; }
+
+    /// <summary>u8 at record+12.</summary>
+    public int Unknown12 { get; set; }
+
+    /// <summary>u8 at record+13.</summary>
+    public int Unknown13 { get; set; }
+
+    /// <summary>u8 at record+14.</summary>
+    public int Unknown14 { get; set; }
+
+    /// <summary>u8 at record+27.</summary>
+    public int Unknown27 { get; set; }
+
+    /// <summary>
+    /// Menu display name from <c>TEXT1.BIN</c> sec6 (without the
+    /// <c>0x03</c> marker). Assign to rename; unread / unassigned keeps
+    /// the file string. Host patches <c>text1.bin</c> in place on fopen
+    /// (same file size). A string that does not fit its section is skipped.
+    /// </summary>
+    public string Name
+    {
+        get => _name ?? "";
+        set
+        {
+            _name = value ?? "";
+            _nameSet = true;
+        }
+    }
+
+    /// <summary>Battle / short label from TEXT1 sec5 (no marker).</summary>
+    public string ShortName
+    {
+        get => _shortName ?? "";
+        set
+        {
+            _shortName = value ?? "";
+            _shortNameSet = true;
+        }
+    }
+
+    /// <summary>Flavor / para line from TEXT1 sec7 (without <c>0x03</c>).</summary>
+    public string Description
+    {
+        get => _description ?? "";
+        set
+        {
+            _description = value ?? "";
+            _descriptionSet = true;
+        }
+    }
+
+    internal bool NameSet => _nameSet;
+    internal bool ShortNameSet => _shortNameSet;
+    internal bool DescriptionSet => _descriptionSet;
+
+    internal void SeedText(string? name, string? shortName, string? description)
+    {
+        _name = name ?? "";
+        _shortName = shortName ?? "";
+        _description = description ?? "";
+    }
 
     /// <summary>Vanilla shop rule: <paramref name="cost"/>/2, or 1 if cost is 1.</summary>
     public static int DefaultSellGold(int cost)

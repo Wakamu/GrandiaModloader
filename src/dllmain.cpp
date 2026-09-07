@@ -32,7 +32,7 @@ DWORD WINAPI MainThread(LPVOID) {
         if (!grandia_mod::InstallSetupHooks()) {
             grandia_mod::LogWarn("setup idle gate not installed");
         } else {
-            grandia_mod::LogInfo("GrandiaMod ready");
+            grandia_mod::LogInfo("GrandiaMod ready (item abi=64 text1=title)");
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         grandia_mod::LogWarn("MainThread crashed during init (exception=0x%08X)", GetExceptionCode());

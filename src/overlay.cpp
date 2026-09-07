@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <vector>
 
 namespace grandia_mod {
 
@@ -36,12 +37,16 @@ void EnsureRuntimeGate() {
     }
 }
 
+}  // namespace
+
 void WaitRuntimeReady() {
     EnsureRuntimeGate();
     if (g_runtime_ready) {
         WaitForSingleObject(g_runtime_ready, 60000);
     }
 }
+
+namespace {
 
 std::string Basename(const char* path) {
     if (!path || !*path) {
@@ -240,6 +245,75 @@ std::uint16_t StemToMapId(const std::string& stem) {
     return static_cast<std::uint16_t>(v);
 }
 
+bool IsText1Path(const char* path) {
+    if (!path) {
+        return false;
+    }
+    const std::string base = Basename(path);
+    return _stricmp(base.c_str(), "TEXT1.BIN") == 0;
+}
+
+void PrepareText1(const char* path) {
+    if (VirtFileHasText1() || !path || !g_orig_fopen) {
+        return;
+    }
+    LogInfo("TEXT1 prepare %s", path);
+
+    FILE* file = g_orig_fopen(path, "rb");
+    if (!file) {
+        return;
+    }
+    if (std::fseek(file, 0, SEEK_END) != 0) {
+        std::fclose(file);
+        return;
+    }
+    const long n = std::ftell(file);
+    if (n <= 0 || n > 2 * 1024 * 1024) {
+        std::fclose(file);
+        return;
+    }
+    if (std::fseek(file, 0, SEEK_SET) != 0) {
+        std::fclose(file);
+        return;
+    }
+    std::vector<std::uint8_t> src(static_cast<std::size_t>(n));
+    const auto got = std::fread(src.data(), 1, src.size(), file);
+    std::fclose(file);
+    if (got != src.size()) {
+        return;
+    }
+    Text1Native req{};
+    req.src = static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(src.data()));
+    req.src_len = static_cast<int>(src.size());
+    if (RuntimePatchText1(&req) != 0 || req.dest == 0 || req.dest_len != req.src_len) {
+        LogWarn("TEXT1 in-place skipped (dest=%u len=%d src=%d)", req.dest, req.dest_len,
+                req.src_len);
+        return;
+    }
+    VirtFileSetText1(reinterpret_cast<const std::uint8_t*>(static_cast<std::uintptr_t>(req.dest)),
+                     static_cast<std::size_t>(req.dest_len));
+    LogInfo("TEXT1 in-place %d bytes", req.dest_len);
+}
+
+}  // namespace
+
+void PrepareText1File(const char* path) {
+    WaitRuntimeReady();
+    PrepareText1(path);
+}
+
+void PrepareText1FromInstall() {
+    char exe[MAX_PATH]{};
+    if (GetModuleFileNameA(nullptr, exe, MAX_PATH) == 0) {
+        return;
+    }
+
+    const std::string path = Dirname(exe) + "\\content\\TEXT\\EN\\TEXT1.BIN";
+    PrepareText1(path.c_str());
+}
+
+namespace {
+
 FILE* __cdecl ModFopenHook(const char* path, const char* mode) {
     std::string stem;
     const bool field_map = path && IsFieldMapPath(path, &stem);
@@ -250,16 +324,12 @@ FILE* __cdecl ModFopenHook(const char* path, const char* mode) {
         if (g_overlay_root.empty()) {
             g_overlay_root = ResolveOverlayRoot();
         }
-        static char opened[48][16]{};
-        static int opened_n = 0;
-        bool seen = false;
-        for (int i = 0; i < opened_n; ++i) {
-            if (stem == opened[i]) {
-                seen = true;
-                break;
-            }
-        }
-        if (!seen) {
+        // One OnMapOpen per enter. MDP/SCN/OFS of the same visit share a stem;
+        // leaving and coming back must assemble again (process-lifetime
+        // opened[] dropped the second visit's scripts/hooks).
+        static char last_open[16]{};
+        const bool same_enter = last_open[0] != 0 && stem == last_open;
+        if (!same_enter) {
             std::uint16_t from = 0;
             std::uint16_t to = 0;
             int spawn = 0;
@@ -273,17 +343,19 @@ FILE* __cdecl ModFopenHook(const char* path, const char* mode) {
             if (dirty < 0) {
                 LogWarn("runtime OnMapOpen failed for %s", stem.c_str());
             } else {
-                if (opened_n < 48 && stem.size() < 16) {
-                    std::memset(opened[opened_n], 0, 16);
-                    std::memcpy(opened[opened_n], stem.c_str(), stem.size());
-                    ++opened_n;
-                }
+                std::memset(last_open, 0, sizeof(last_open));
+                const auto n = stem.size() < sizeof(last_open) ? stem.size() : sizeof(last_open) - 1;
+                std::memcpy(last_open, stem.c_str(), n);
                 if (dirty > 0) {
                     LogInfo("runtime map patch %s from=0x%04X to=0x%04X spawn=%d", stem.c_str(),
                             from, to, spawn);
                 }
             }
         }
+    }
+
+    if (IsText1Path(path)) {
+        LogInfo("TEXT1 fopen %s (patch off)", path);
     }
 
     if (FILE* virt = VirtFileOpen(path, mode)) {

@@ -84,6 +84,7 @@ using OnMagicFn = int(__cdecl*)(MagicNative* req);
 using OnDialogueFn = int(__cdecl*)(DialogueNative* req);
 using BindHostFn = int(__cdecl*)(HostApiNative* api);
 using GetMapFileFn = int(__cdecl*)(MapFileNative* req);
+using PatchText1Fn = int(__cdecl*)(Text1Native* req);
 
 HMODULE g_hostfxr = nullptr;
 hostfxr_handle g_ctx = nullptr;
@@ -114,6 +115,7 @@ OnMagicFn g_on_magic = nullptr;
 OnDialogueFn g_on_dialogue = nullptr;
 BindHostFn g_bind_host = nullptr;
 GetMapFileFn g_get_map_file = nullptr;
+PatchText1Fn g_patch_text1 = nullptr;
 bool g_ready = false;
 
 std::wstring Widen(const std::string& s) {
@@ -473,18 +475,21 @@ __declspec(noinline) bool LoadRuntime() {
                          L"BindHost", unmanaged_only, nullptr, &bind_ptr);
     const int mfrc = load(assembly.c_str(), L"Grandia.Runtime.NativeEntry, Grandia.Runtime",
                           L"GetMapFile", unmanaged_only, nullptr, &map_file_ptr);
+    void* text1_ptr = nullptr;
+    const int t1rc = load(assembly.c_str(), L"Grandia.Runtime.NativeEntry, Grandia.Runtime",
+                          L"PatchText1", unmanaged_only, nullptr, &text1_ptr);
     if (irc != 0 || orc != 0 || prc != 0 || frc != 0 || arc != 0 || grc != 0 || wrc != 0 || src != 0 ||
         lrc != 0 || brc_battle != 0 || brc_setup != 0 || mrc != 0 || erc != 0 || shrc != 0 ||
         wlrc != 0 || scrc != 0 || hkrc != 0 || tvrc != 0 || tkrc != 0 || tsrc != 0 || chrc != 0 ||
         itrc != 0 || mgrc != 0 || dlrc != 0 || brc != 0 ||
-        mfrc != 0 ||
+        mfrc != 0 || t1rc != 0 ||
         !init_ptr ||
         !open_ptr || !patch_ptr || !flag_ptr || !assign_ptr || !gold_ptr || !wm_ptr || !save_ptr ||
         !load_ptr || !battle_ptr || !setup_ptr || !menu_ptr || !enemy_ptr || !shop_ptr ||
         !wm_load_ptr || !script_ptr || !hook_ptr || !travel_ptr || !tick_ptr || !title_ptr ||
         !character_ptr || !item_ptr || !magic_ptr || !dialogue_ptr ||
         !bind_ptr ||
-        !map_file_ptr) {
+        !map_file_ptr || !text1_ptr) {
         LogWarn(
             "load Grandia.Runtime entry points failed (init=%d open=%d patch=%d flag=%d assign=%d gold=%d wm=%d save=%d load=%d battle=%d setup=%d menu=%d enemy=%d shop=%d wmload=%d bind=%d)",
             irc, orc, prc, frc, arc, grc, wrc, src, lrc, brc_battle, brc_setup, mrc, erc, shrc,
@@ -518,6 +523,7 @@ __declspec(noinline) bool LoadRuntime() {
     g_on_dialogue = reinterpret_cast<OnDialogueFn>(dialogue_ptr);
     g_bind_host = reinterpret_cast<BindHostFn>(bind_ptr);
     g_get_map_file = reinterpret_cast<GetMapFileFn>(map_file_ptr);
+    g_patch_text1 = reinterpret_cast<PatchText1Fn>(text1_ptr);
 
     const std::string mods_json = dll_dir + "\\mods.json";
     LogInfo("CLR: Init(%s)", mods_json.c_str());
@@ -827,6 +833,13 @@ int RuntimeOnItem(ItemNative* req) {
         return -1;
     }
     return g_on_item(req);
+}
+
+int RuntimePatchText1(Text1Native* req) {
+    if (!g_ready || !g_patch_text1 || !req) {
+        return -1;
+    }
+    return g_patch_text1(req);
 }
 
 int RuntimeOnMagic(MagicNative* req) {

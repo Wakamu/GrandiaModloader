@@ -30,10 +30,13 @@ public sealed class EnemyLoadedEvent
     /// <summary>Combatant id (actor+4).</summary>
     public int ActorId { get; }
 
-    /// <summary>Species-map slot at actor+0x189 (1-based catalog index).</summary>
+    /// <summary>Species-map slot at actor+0x189 (1-based catalog index, 1..15).</summary>
     public int Catalog { get; }
 
-    /// <summary>M_DAT form-row at actor+0x15A (same id as <see cref="Species"/>).</summary>
+    /// <summary>
+    /// M_DAT species id (<see cref="Species"/>), from <c>SpeciesMap[Catalog]</c>
+    /// at ctx+0x64a07. Actor+0x15A is that catalog slot, not this value.
+    /// </summary>
     public int FormRow { get; }
 
     public Species Species => (Species)FormRow;

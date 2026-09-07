@@ -41,11 +41,14 @@ public sealed class ShopOpenEvent
 
     /// <summary>
     /// Buy gold for items in this shop, seeded from the global WINDT catalog
-    /// (sec3 +4). Mutate a value to override the price while this shop is
-    /// open. Same item id shares one catalog cost, so a change applies to
-    /// every page that sells it. Restored on the next shop or map load.
+    /// (sec3 +4). Call <see cref="SetPrice"/> to override buy-gold while
+    /// this shop is open. Items added to stock without an override keep
+    /// catalog <see cref="ItemEvent.Cost"/> — a missing entry is not gold
+    /// 0. Restored on the next shop or map load.
     /// </summary>
     public Dictionary<Item, int> Prices { get; } = [];
+
+    private readonly Dictionary<Item, int> _seededPrices = [];
 
     public List<Item> Page(int index) => index switch
     {
@@ -58,6 +61,33 @@ public sealed class ShopOpenEvent
     public int GetPrice(Item item) => Prices.TryGetValue(item, out var gold) ? gold : 0;
 
     public void SetPrice(Item item, int gold) => Prices[item] = gold < 0 ? 0 : gold;
+
+    /// <summary>
+    /// Seed catalog gold for an item already in the shop. Not a session
+    /// override — <see cref="HasPriceOverride"/> is false until the value
+    /// changes or a new id is added to <see cref="Prices"/>.
+    /// </summary>
+    public void SeedPrice(Item item, int gold)
+    {
+        var n = gold < 0 ? 0 : gold;
+        Prices[item] = n;
+        _seededPrices[item] = n;
+    }
+
+    /// <summary>
+    /// True when this open changed buy-gold for <paramref name="item"/>.
+    /// New stock without a <see cref="Prices"/> entry is not an override
+    /// (host must leave catalog Cost alone, not write 0).
+    /// </summary>
+    public bool HasPriceOverride(Item item)
+    {
+        if (!Prices.TryGetValue(item, out var gold))
+        {
+            return false;
+        }
+
+        return !_seededPrices.TryGetValue(item, out var seed) || gold != seed;
+    }
 
     /// <summary>
     /// Sell gold for bag items. Empty until a mod sets a value; otherwise

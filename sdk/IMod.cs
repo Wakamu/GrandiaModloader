@@ -10,7 +10,8 @@ namespace Grandia.Sdk;
 public interface IMod
 {
     /// <summary>
-    /// Game is <c>fopen</c>ing an MDP/SCN/OFS (assemble signal). Mutate
+    /// Map enter (first fopen of this visit). MDP/SCN/OFS of the same enter
+    /// share one call; leaving and coming back fires again. Mutate
     /// <see cref="MapLoadEvent.Map"/>; do not return a new map. Assembled
     /// scripts and hooks are delivered by redirecting <see cref="OnScriptExecute"/>
     /// / <see cref="OnCallHook"/> — the host does not remap fopen. Scripts,
@@ -181,8 +182,9 @@ public interface IMod
     /// <see cref="ShopKind.Buy"/> is an item shop; <see cref="ShopKind.Magic"/>
     /// is the Mana Egg tutor. Mutate <see cref="ShopOpenEvent.Weapons"/> /
     /// <see cref="ShopOpenEvent.Armor"/> / <see cref="ShopOpenEvent.Goods"/>
-    /// (up to 16 each) and <see cref="ShopOpenEvent.Prices"/> (WINDT catalog
-    /// buy-gold). <see cref="ShopKind.Sell"/> is the sell screen — use
+    /// (up to 16 each) and <see cref="ShopOpenEvent.SetPrice"/> (session
+    /// buy-gold). Items added to stock without SetPrice keep catalog
+    /// <see cref="ItemEvent.Cost"/>. <see cref="ShopKind.Sell"/> is the sell screen — use
     /// <see cref="ShopOpenEvent.SetSellPrice"/>; inventory is not writable.
     /// Writes the live field-params copy of MDP sec[10] on Buy.
     /// </summary>
@@ -222,10 +224,13 @@ public interface IMod
     /// <summary>
     /// WINDT sec3 item record after each status / shop / stash load
     /// publishes sec3 (before the shop bakes prices). Cost / SellPrice /
-    /// icon / paras write every live sec3 alias. <see cref="ItemEvent.Effect"/>
-    /// is the skill id used in combat (Herbs → Heal). Re-apply on every open —
-    /// the game recopies vanilla WINDT each time. SellPrice defaults to
-    /// Cost/2 (vanilla shop rule).
+    /// icon / paras / leftover record bytes write every live sec3 alias.
+    /// <see cref="ItemEvent.Name"/> / ShortName / Description patch
+    /// <c>TEXT1.BIN</c> in place at the title screen (same file size; a
+    /// string that does not fit is skipped). Unused vanilla slots included.
+    /// <see cref="ItemEvent.Effect"/> is the skill id used in combat
+    /// (Herbs → Heal). Re-apply on every open — the game recopies vanilla
+    /// WINDT each time. SellPrice defaults to Cost/2 (vanilla shop rule).
     /// </summary>
     void OnItem(ItemEvent e)
     {
@@ -233,8 +238,9 @@ public interface IMod
 
     /// <summary>
     /// Party skill catalog (WINDT sec7/sec8 on field menus; STAT/BBG in
-    /// battle). Magic and weapon moves. Mutate Power, Cost (MP/SP), IpCost
-    /// (IP gauge), Requirements, CharacterMask / Allow, Effect / Mode
+    /// battle). Magic and weapon moves. Mutate Power (signed), Cost (MP/SP),
+    /// Speed (casting time), Exp (XP per hit), Radius / Distance,
+    /// CancelChance, Requirements, CharacterMask / Allow, Effect / Mode
     /// (<see cref="HealMode"/>, <see cref="StatusAilment"/>, …).
     /// Re-applied on every menu WINDT load. Grant already-learned bits on
     /// <see cref="OnCharacter"/>.

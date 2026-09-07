@@ -312,9 +312,24 @@ struct ItemNative {
     std::int32_t sell_price;
     std::int32_t effect;
     std::int32_t effect_value;
+    std::int32_t unknown8;
+    std::int32_t unknown11;
+    std::int32_t unknown12;
+    std::int32_t unknown13;
+    std::int32_t unknown14;
+    std::int32_t unknown27;
 };
 #pragma pack(pop)
-static_assert(sizeof(ItemNative) == 64, "ItemNative pack must match C#");
+static_assert(sizeof(ItemNative) == 88, "ItemNative pack must match C#");
+
+#pragma pack(push, 1)
+struct Text1Native {
+    std::uint32_t src;
+    std::int32_t src_len;
+    std::uint32_t dest;
+    std::int32_t dest_len;
+};
+#pragma pack(pop)
 
 #pragma pack(push, 1)
 struct MagicNative {
@@ -334,12 +349,15 @@ struct MagicNative {
     std::int32_t mode;
     std::int32_t crit;
     char name[32];
+    std::int32_t radius;
+    std::int32_t distance;
 };
 #pragma pack(pop)
-static_assert(sizeof(MagicNative) == 116, "MagicNative pack must match C#");
+static_assert(sizeof(MagicNative) == 124, "MagicNative pack must match C#");
 
 int RuntimeOnCharacter(CharacterNative* req);
 int RuntimeOnItem(ItemNative* req);
+int RuntimePatchText1(Text1Native* req);
 int RuntimeOnMagic(MagicNative* req);
 
 constexpr unsigned kDialogueMaxPayload = 4096;

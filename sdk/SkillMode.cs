@@ -46,7 +46,7 @@ public enum DamageKind
     WeaponElement = 2,
 }
 
-/// <summary><see cref="EffectType.PowerUpDown"/> Mode. Sign comes from Power (high = down).</summary>
+/// <summary><see cref="EffectType.PowerUpDown"/> Mode. Negative <see cref="MagicEvent.Power"/> is a down.</summary>
 public enum StatMod
 {
     Attack = 0,

@@ -1597,6 +1597,18 @@ void Write16(std::uint8_t* p, int value) {
     std::memcpy(p, &v, 2);
 }
 
+std::int16_t ReadI16(const std::uint8_t* p) {
+    std::int16_t v = 0;
+    std::memcpy(&v, p, 2);
+    return v;
+}
+
+void WriteI16(std::uint8_t* p, int value) {
+    // Two's complement: -1 and 65535 both store 0xFFFF.
+    auto v = static_cast<std::int16_t>(static_cast<std::uint16_t>(value));
+    std::memcpy(p, &v, 2);
+}
+
 std::uint8_t ClampU8(int value) {
     if (value < 0) {
         return 0;
@@ -1644,7 +1656,7 @@ void ParseEnemySkills(std::uint8_t* model, std::size_t model_bytes, grandia_mod:
         if (hdrs) {
             hdrs[i] = p;
         }
-        req.skill_power[i] = Read16(p + 6);
+        req.skill_power[i] = ReadI16(p + 6);
         req.skill_speed[i] = p[0x13];
         req.skill_element[i] = p[0xA];
         req.skill_effect[i] = p[0xD];
@@ -1704,6 +1716,28 @@ void MarkEnemyLoadedForm(int form_row) {
         return;
     }
     g_enemy_loaded_forms[g_enemy_loaded_fired_n++] = form_row;
+}
+
+// actor+0x15A / +0x189 are the 1..15 catalog slot, not the M_DAT species.
+// Species is SpeciesMap[slot] at ctx+0x64a07 (Green Slime = 126, not slot 1).
+int ReadMappedFormRow(std::uint8_t catalog, std::uint8_t slot_15a) {
+    if (catalog == 0) {
+        catalog = slot_15a;
+    }
+    if (catalog == 0 || catalog >= 16u) {
+        return slot_15a > 16u ? static_cast<int>(slot_15a) : 0;
+    }
+    void* ctxp = nullptr;
+    if (!grandia_mod::SafeReadPointer(grandia_mod::ModuleBase() + grandia_mod::kBattleCtxPtrRva,
+                                     &ctxp) ||
+        !ctxp) {
+        return 0;
+    }
+    auto* ctx = static_cast<std::uint8_t*>(ctxp);
+    if (!grandia_mod::PtrReadable(ctx + 0x64a07u, 16)) {
+        return 0;
+    }
+    return ctx[0x64a07u + catalog];
 }
 
 constexpr std::uintptr_t kWindtHeapRva = 0x240E68u;
@@ -1908,6 +1942,12 @@ extern "C" void ModOnShopOpen(int kind) {
     if (kind == 2) {
         return;
     }
+    // Do not FireItemCatalog here. OnShopOpen is the start of the shop
+    // function — rewriting sec3 first (Rusty Knife → Lump of Coal) makes
+    // the buy-list builder walk the mutated row and crash. OnItem runs at
+    // WINDT finalize after the list exists. New stock without a catalog
+    // snapshot is not gold 0 (ShopOpenEvent SeedPrice / -1 writeback).
+    grandia_mod::LogInfo("OnShopOpen kind=%d", kind);
     void* params = nullptr;
     if (!grandia_mod::SafeReadPointer(grandia_mod::ModuleBase() + grandia_mod::kFieldParamsPtrRva,
                                      &params) ||
@@ -1938,6 +1978,9 @@ extern "C" void ModOnShopOpen(int kind) {
             continue;
         }
         const int want = req.prices[i];
+        if (want < 0) {
+            continue;
+        }
         const int now = ReadWindtCost(id);
         RememberShopPrice(id, now, want);
         WriteWindtCost(id, want);
@@ -1954,13 +1997,17 @@ extern "C" void ModOnEnemyLoaded(void* actor) {
     if (a[2] != 7) {
         return;
     }
-    const int form_row = a[0x15A];
+    std::uint8_t catalog = a[0x189];
+    if (catalog == 0) {
+        catalog = a[0x25];
+    }
+    const int form_row = ReadMappedFormRow(catalog, a[0x15A]);
     if (EnemyLoadedFormFired(form_row)) {
         return;
     }
     grandia_mod::EnemyLoadedNative req{};
     req.actor_id = a[4];
-    req.catalog = a[0x189];
+    req.catalog = catalog;
     req.form_row = form_row;
     req.level = a[0x10E];
     req.hp = Read16(a + 0x100);
@@ -2008,6 +2055,8 @@ extern "C" void ModOnEnemyLoaded(void* actor) {
         }
         return;
     }
+    grandia_mod::LogInfo("EnemyLoaded cat=%d form=%d lv=%d hp=%d/%d", req.catalog, req.form_row,
+                         req.level, req.hp, req.max_hp);
     if (grandia_mod::RuntimeOnEnemyLoaded(&req) != 0) {
         return;
     }
@@ -2059,7 +2108,7 @@ extern "C" void ModOnEnemyLoaded(void* actor) {
             if (!hdr || !grandia_mod::PtrReadable(hdr, 22u)) {
                 continue;
             }
-            Write16(hdr + 6, req.skill_power[i]);
+            WriteI16(hdr + 6, req.skill_power[i]);
             hdr[0xA] = ClampU8(req.skill_element[i]);
             hdr[0xD] = ClampU8(req.skill_effect[i]);
             hdr[0xE] = ClampU8(req.skill_mode[i]);

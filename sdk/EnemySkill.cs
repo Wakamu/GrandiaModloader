@@ -29,7 +29,10 @@ public sealed class EnemySkill
     /// <summary>Display name from the model (read-only for identification).</summary>
     public string Name { get; set; } = "";
 
-    /// <summary>u16 at skill header +6.</summary>
+    /// <summary>
+    /// Base Power (s16 at skill header +6). Same signed scale as
+    /// <see cref="MagicEvent.Power"/> (−1 is 65535 if read as unsigned).
+    /// </summary>
     public int Power { get; set; }
 
     /// <summary>

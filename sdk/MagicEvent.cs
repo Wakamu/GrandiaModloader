@@ -45,23 +45,35 @@ public sealed class MagicEvent
     /// </summary>
     public List<LearnRequirement> Requirements { get; }
 
-    /// <summary>Combat power / heal potency (u16 at combat row +8).</summary>
+    /// <summary>
+    /// Base Power (s16 at combat row +8). Damage / heal amount, or
+    /// signed buff/debuff stages. FAQ writes (+2) / (−1); 65535 is −1
+    /// if read as unsigned. Caps at +7 / −7 for stat mods.
+    /// </summary>
     public int Power { get; set; }
 
     /// <summary>
-    /// MP (magic) or SP (weapon move) shown in menus and spent in battle.
-    /// Combat row u16 at +2, indexed as skill id - 1 (Burn is row 11).
-    /// This is not <see cref="IpCost"/>.
+    /// MP (magic) or SP (weapon move). Combat row u16 at +2.
+    /// Not <see cref="Speed"/>.
     /// </summary>
     public int Cost { get; set; }
 
-    /// <summary>Cast time / IP-gauge field (combat row u16 at +4). Not the MP/SP number.</summary>
-    public int IpCost { get; set; }
+    /// <summary>
+    /// Casting Time (combat row u16 at +4). Redux labels this Speed.
+    /// Burn! is 30, Shockwave 90. Not MP/SP — that is <see cref="Cost"/>.
+    /// </summary>
+    public int Speed { get; set; }
+
+    /// <summary>Same as <see cref="Speed"/> (old name).</summary>
+    public int IpCost
+    {
+        get => Speed;
+        set => Speed = value;
+    }
 
     /// <summary>
-    /// IP knockback (combat row u16 at +6). How far the target is pushed
-    /// back on the IP bar. Shockwave is 3000, Lotus Cut / Ice Slash 8500,
-    /// Heal is 0.
+    /// IP Knockback (combat row u16 at +6). How far the target is pushed
+    /// on the IP bar. V-Slash is 3500, Milda Hit 9999, Heal is 0.
     /// </summary>
     public int IpKnockback { get; set; }
 
@@ -72,8 +84,30 @@ public sealed class MagicEvent
         set => IpKnockback = value;
     }
 
-    /// <summary>Range-ish byte (STAT sec0 +12).</summary>
-    public int Range { get; set; }
+    /// <summary>
+    /// EXP Rate (combat row +12). Element / weapon XP per target hit.
+    /// Heal vanilla 8; Redux 15. Not targeting range.
+    /// </summary>
+    public int Exp { get; set; }
+
+    /// <summary>Same as <see cref="Exp"/> (old name). Real AoE is <see cref="Radius"/>.</summary>
+    public int Range
+    {
+        get => Exp;
+        set => Exp = value;
+    }
+
+    /// <summary>
+    /// Circle AoE size (combat row +13). Burn! 15, Howl 32, Shockwave 30.
+    /// 0 is single-target / no radius.
+    /// </summary>
+    public int Radius { get; set; }
+
+    /// <summary>
+    /// Walk-up Distance (combat row +23). V-Slash is 4. 0 is “Any”.
+    /// Independent of equipped weapon range.
+    /// </summary>
+    public int Distance { get; set; }
 
     /// <summary>
     /// Combat element bits at STAT sec0 +14. Prefer <see cref="Combat"/>.
@@ -106,10 +140,18 @@ public sealed class MagicEvent
     public int Mode { get; set; }
 
     /// <summary>
-    /// Critical-hit percent at combat row +17 (0–100). Shockwave is 10,
-    /// Midair Cut is 100. Not <see cref="EnemySkill.Chance"/> (status proc).
+    /// Cancel % at combat row +17 (0–100). Chance to cancel an enemy
+    /// between COM and ACT. Shockwave is 10, Midair Cut is 100.
+    /// Not <see cref="EnemySkill.Chance"/> (status proc).
     /// </summary>
-    public int CriticalChance { get; set; }
+    public int CancelChance { get; set; }
+
+    /// <summary>Same as <see cref="CancelChance"/> (old name).</summary>
+    public int CriticalChance
+    {
+        get => CancelChance;
+        set => CancelChance = value;
+    }
 
     public HealMode Heal
     {

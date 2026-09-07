@@ -31,6 +31,7 @@ struct HostApiNative {
     int(__cdecl* overlay_clear_panel)();
     int(__cdecl* overlay_panel_active)();
     int(__cdecl* party_walk_get)(int* x, int* y, int* z);
+    int(__cdecl* set_text1)(const void* data, int len);
 };
 
 bool InstallGameServices();

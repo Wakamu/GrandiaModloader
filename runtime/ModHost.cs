@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Runtime.Loader;
 using Grandia.Sdk;
 
@@ -14,7 +15,6 @@ public static class ModHost
     private static int PluginCount;
     private static readonly List<string> SearchDirs = [];
     private static readonly List<Assembly> LoadedAssemblies = [];
-    private static readonly HashSet<string> Assembled = new(StringComparer.OrdinalIgnoreCase);
     private static bool Loaded;
     private static bool ResolverHooked;
 
@@ -154,13 +154,7 @@ public static class ModHost
             }
 
             var fromId = new MapId(from);
-            // Assemble once per stem. from/to/spawn are often 0 on dest-arrival
-            // fopen; bind-time apply uses this cache on every map enter.
-            if (Assembled.Contains(stem))
-            {
-                return MapRamStore.IsDirty(stem) ? 1 : 0;
-            }
-
+            // Once per enter. Native already collapsed MDP/SCN/OFS of this visit.
             var map = new Map(stem);
             if (embedded && packed!.Mdp != null)
             {
@@ -202,7 +196,6 @@ public static class ModHost
 
             if (!map.Dirty)
             {
-                Assembled.Add(stem);
                 if (embedded)
                 {
                     MapRamStore.LoadEmbedded(stem, packed!.Mdp, packed.Scn, packed.Ofs);
@@ -245,7 +238,6 @@ public static class ModHost
             MapRamStore.LoadLive(stem, patch);
             log?.Invoke(
                 $"OnMapOpen {stem} hydrate={hydrateMs}ms emit={sw.ElapsedMilliseconds}ms sec7={patch.Sec7.Length} scripts={patch.Scripts.Count} hooks={patch.Hooks.Count} (in-process)");
-            Assembled.Add(stem);
             return 1;
         }
     }
@@ -323,6 +315,81 @@ public static class ModHost
     public static void OnTitleScreen(TitleScreenEvent ev, Action<string>? log = null)
     {
         InvokeHooks("OnTitleScreen", ev);
+    }
+
+    private static int Text1State;
+
+    /// <summary>
+    /// Managed TEXT1 patch after the title hook (not native boot / SDL).
+    /// Reads the HD file, runs OnItem for names, pins an in-place blob.
+    /// </summary>
+    public static void TryApplyItemText1(Action<string>? log = null)
+    {
+        if (Interlocked.CompareExchange(ref Text1State, 1, 0) != 0)
+        {
+            return;
+        }
+
+        try
+        {
+            var exe = Environment.ProcessPath;
+            if (string.IsNullOrEmpty(exe))
+            {
+                log?.Invoke("TEXT1 skip: no process path");
+                return;
+            }
+
+            var path = Path.Combine(Path.GetDirectoryName(exe)!, "content", "TEXT", "EN", "TEXT1.BIN");
+            if (!File.Exists(path))
+            {
+                log?.Invoke($"TEXT1 skip: missing {path}");
+                return;
+            }
+
+            var src = File.ReadAllBytes(path);
+            var tables = ItemTextBin.Parse(src);
+            for (var id = 1; id <= ItemTextBin.ItemCount; id++)
+            {
+                var ev = new ItemEvent(id, 0, 0, 0);
+                ev.SeedText(tables.Names[id - 1], tables.ShortNames[id - 1],
+                    tables.Descriptions[id - 1]);
+                OnItem(ev, log);
+                if (ev.NameSet)
+                {
+                    tables.Names[id - 1] = ev.Name;
+                }
+
+                if (ev.ShortNameSet)
+                {
+                    tables.ShortNames[id - 1] = ev.ShortName;
+                }
+
+                if (ev.DescriptionSet)
+                {
+                    tables.Descriptions[id - 1] = ev.Description;
+                }
+            }
+
+            var result = ItemTextBin.PatchInPlace(src, tables);
+            if (result.Data.Length != src.Length)
+            {
+                log?.Invoke($"TEXT1 skip: resized {src.Length} -> {result.Data.Length}");
+                return;
+            }
+
+            var pin = PinText1(result.Data);
+            if (Game.Native?.SetText1(pin, result.Data.Length) is not > 0)
+            {
+                log?.Invoke("TEXT1 skip: host SetText1 failed");
+                return;
+            }
+
+            log?.Invoke($"TEXT1 title-patch {src.Length} applied={result.Applied} skipped={result.Skipped}");
+        }
+        catch (Exception ex)
+        {
+            log?.Invoke($"TEXT1 title-patch failed: {ex}");
+        }
     }
 
     public static void OnCharacter(CharacterEvent ev, Action<string>? log = null)
@@ -596,6 +663,24 @@ public static class ModHost
         }
     }
 
+    private static GCHandle Text1Pin;
+    private static byte[]? Text1Bytes;
+
+    internal static nint PinText1(byte[] data)
+    {
+        lock (Gate)
+        {
+            if (Text1Pin.IsAllocated)
+            {
+                Text1Pin.Free();
+            }
+
+            Text1Bytes = data;
+            Text1Pin = GCHandle.Alloc(data, GCHandleType.Pinned);
+            return Text1Pin.AddrOfPinnedObject();
+        }
+    }
+
     internal static bool TryFillPatchInfo(string stem, out MapRamPatch? patch)
     {
         lock (Gate)
@@ -704,7 +789,7 @@ public static class ModHost
             var patch = MapRamStore.Get(stem);
             var ev = new CallHookEvent(mapId, hookId, table)
             {
-                Row = table == 1 && patch != null && patch.Hooks.TryGetValue(hookId, out var blob)
+                Row = table != 1 && patch != null && patch.Hooks.TryGetValue(hookId, out var blob)
                     ? blob.Bytes
                     : null,
             };

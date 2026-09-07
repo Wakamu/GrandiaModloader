@@ -3,6 +3,7 @@
 #include "hook_util.h"
 #include "log.h"
 #include "party.h"
+#include "virt_file.h"
 
 extern "C" int ModTurboGet();
 extern "C" int ModTurboSet(int level);
@@ -434,6 +435,7 @@ void FillHostApi(HostApiNative* api) {
     api->overlay_clear_panel = &ModOverlayClearPanel;
     api->overlay_panel_active = &ModOverlayPanelActive;
     api->party_walk_get = &ModPartyWalkGet;
+    api->set_text1 = &ModSetText1;
 }
 
 bool InstallGameServices() {

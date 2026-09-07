@@ -95,6 +95,10 @@ std::atomic<int> g_magic_spawn_done{0};
 bool g_windt_finalize_hooked = false;
 std::uint16_t g_catalog_sell_gold[512]{};
 std::uint8_t g_catalog_sell_set[512]{};
+std::uint8_t* g_battle_sec3[4]{};
+unsigned g_battle_sec3_n = 0;
+bool g_battle_sec3_scanned = false;
+std::atomic<int> g_battle_items_applied{0};
 
 void* g_fin_site[3]{};
 std::uint8_t g_fin_original[3][5]{};
@@ -134,6 +138,18 @@ std::uint32_t Read32(const std::uint8_t* p) {
 
 void Write16(std::uint8_t* p, int value) {
     auto v = static_cast<std::uint16_t>(value < 0 ? 0 : value > 0xFFFF ? 0xFFFF : value);
+    std::memcpy(p, &v, 2);
+}
+
+std::int16_t ReadI16(const std::uint8_t* p) {
+    std::int16_t v = 0;
+    std::memcpy(&v, p, 2);
+    return v;
+}
+
+void WriteI16(std::uint8_t* p, int value) {
+    // Two's complement: -1 and 65535 both store 0xFFFF.
+    auto v = static_cast<std::int16_t>(static_cast<std::uint16_t>(value));
     std::memcpy(p, &v, 2);
 }
 
@@ -210,10 +226,98 @@ std::uint8_t* CharBlock(std::uint8_t* map_obj, int char_id) {
 }
 
 bool LooksLikeSec3(const std::uint8_t* sec3) {
-    if (!sec3 || !PtrReadable(sec3, kWindtRecSize)) {
+    if (!sec3 || !PtrReadable(sec3, kWindtRecSize * 8u)) {
         return false;
     }
-    return Read16(sec3) == 1;
+    for (int i = 0; i < 8; ++i) {
+        if (Read16(sec3 + static_cast<unsigned>(i) * kWindtRecSize) !=
+            static_cast<std::uint16_t>(i + 1)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void ResetBattleItemTables() {
+    g_battle_sec3_n = 0;
+    g_battle_sec3_scanned = false;
+    g_battle_items_applied.store(0, std::memory_order_release);
+    std::memset(g_battle_sec3, 0, sizeof(g_battle_sec3));
+}
+
+void RememberBattleSec3(std::uint8_t* p) {
+    if (!p || g_battle_sec3_n >= 4u) {
+        return;
+    }
+    for (unsigned i = 0; i < g_battle_sec3_n; ++i) {
+        if (g_battle_sec3[i] == p) {
+            return;
+        }
+    }
+    g_battle_sec3[g_battle_sec3_n++] = p;
+}
+
+void ScanBattleItemTables() {
+    if (g_battle_sec3_scanned && g_battle_sec3_n > 0) {
+        bool ok = true;
+        for (unsigned i = 0; i < g_battle_sec3_n; ++i) {
+            if (!LooksLikeSec3(g_battle_sec3[i])) {
+                ok = false;
+                break;
+            }
+        }
+        if (ok) {
+            return;
+        }
+        ResetBattleItemTables();
+    }
+    void* ctxp = nullptr;
+    if (!SafeReadPointer(ModuleBase() + kStatRamPtrRva, &ctxp) || !ctxp) {
+        return;
+    }
+    auto* ctx = static_cast<std::uint8_t*>(ctxp);
+    constexpr std::uintptr_t kKnown[] = {
+        kStatInRam + 0x1830u,
+        0x3A694u,
+        0x3972Cu,
+        0x35FD0u,
+        kStatInRam + 0x3A694u,
+        kStatInRam + 0x3972Cu,
+        kStatInRam + 0x35FD0u,
+    };
+    for (auto off : kKnown) {
+        auto* p = ctx + off;
+        if (LooksLikeSec3(p)) {
+            RememberBattleSec3(p);
+        }
+    }
+    auto* win = ctx + kStatInRam;
+    constexpr std::size_t kWin = 0x80000u;
+    if (g_battle_sec3_n == 0 && PtrReadable(win, kWin)) {
+        for (std::size_t off = 0; off + kWindtRecSize * 8u < kWin; off += 4u) {
+            if (Read16(win + off) != 1) {
+                continue;
+            }
+            bool ok = true;
+            for (int i = 1; i < 8; ++i) {
+                if (Read16(win + off + static_cast<unsigned>(i) * kWindtRecSize) !=
+                    static_cast<std::uint16_t>(i + 1)) {
+                    ok = false;
+                    break;
+                }
+            }
+            if (ok) {
+                RememberBattleSec3(win + off);
+                if (g_battle_sec3_n >= 4u) {
+                    break;
+                }
+            }
+        }
+    }
+    g_battle_sec3_scanned = true;
+    if (g_battle_sec3_n > 0) {
+        LogInfo("Battle item tables %u", g_battle_sec3_n);
+    }
 }
 
 void AddSec3(std::uint8_t** out, unsigned* n, unsigned cap, std::uint8_t* p) {
@@ -247,6 +351,10 @@ unsigned CollectSec3(std::uint8_t** out, unsigned cap) {
         if (SafeReadPointer(ModuleBase() + rva, &p) && p) {
             AddSec3(out, &n, cap, static_cast<std::uint8_t*>(p));
         }
+    }
+    ScanBattleItemTables();
+    for (unsigned i = 0; i < g_battle_sec3_n; ++i) {
+        AddSec3(out, &n, cap, g_battle_sec3[i]);
     }
     return n;
 }
@@ -609,12 +717,14 @@ void WriteMagicRow(const MagicTable& t, int id, const MagicNative& req) {
             Write16(crec + 2, req.cost);
             Write16(crec + 4, req.ip_cost);
             Write16(crec + 6, req.area);
-            Write16(crec + 8, req.power);
+            WriteI16(crec + 8, req.power);
             crec[12] = ClampU8(req.range);
+            crec[13] = ClampU8(req.radius);
             crec[14] = ClampU8(req.element_flags);
             crec[18] = ClampU8(req.effect);
             crec[19] = ClampU8(req.mode);
             crec[17] = ClampU8(req.crit);
+            crec[23] = ClampU8(req.distance);
         }
     }
 }
@@ -679,13 +789,15 @@ void FireMagicCatalog() {
         }
         req.cost = Read16(crec + 2);
         req.ip_cost = Read16(crec + 4);
-        req.power = Read16(crec + 8);
+        req.power = ReadI16(crec + 8);
         req.area = Read16(crec + 6);
         req.range = crec[12];
+        req.radius = crec[13];
         req.element_flags = crec[14];
         req.effect = crec[18];
         req.mode = crec[19];
         req.crit = crec[17];
+        req.distance = crec[23];
         if (req.element == 0) {
             req.element = ElementFromFlags(req.element_flags);
         }
@@ -758,6 +870,14 @@ void WriteItemRecord(std::uint8_t* rec, const ItemNative& req) {
     Write16(rec + 21, req.para2_post);
     Write16(rec + 23, req.para3_post);
     Write16(rec + 25, req.para4_post);
+    // Seed these before OnItem. Writing unsseeded 0 here wipes every
+    // weapon-class byte (Rusty Knife +8/+13/+14) and crashes the shop.
+    rec[8] = ClampU8(req.unknown8);
+    rec[11] = ClampU8(req.unknown11);
+    rec[12] = ClampU8(req.unknown12);
+    rec[13] = ClampU8(req.unknown13);
+    rec[14] = ClampU8(req.unknown14);
+    rec[27] = ClampU8(req.unknown27);
 }
 
 void FireItemCatalog() {
@@ -767,6 +887,7 @@ void FireItemCatalog() {
         LogWarn("WINDT finalize: no live sec3 yet");
         return;
     }
+    LogInfo("OnItem catalog begin aliases=%u", nsec);
     ClearCatalogSell();
     for (int id = 1; id <= 511; ++id) {
         const auto off = static_cast<unsigned>(id - 1) * kWindtRecSize;
@@ -793,6 +914,12 @@ void FireItemCatalog() {
         req.para2_post = Read16(rec + 21);
         req.para3_post = Read16(rec + 23);
         req.para4_post = Read16(rec + 25);
+        req.unknown8 = rec[8];
+        req.unknown11 = rec[11];
+        req.unknown12 = rec[12];
+        req.unknown13 = rec[13];
+        req.unknown14 = rec[14];
+        req.unknown27 = rec[27];
         req.sell_price = DefaultSellGold(req.cost);
         if (RuntimeOnItem(&req) != 0) {
             continue;
@@ -806,6 +933,14 @@ void FireItemCatalog() {
         }
     }
     g_items_fired.store(1, std::memory_order_release);
+    if (nsec > 0) {
+        auto* coal = secs[nsec - 1] + 63u * kWindtRecSize;
+        if (PtrReadable(coal, kWindtRecSize) && Read16(coal) == 64) {
+            LogInfo("Item64 aliases=%u p2=%u icon=%u u7=%u u8=%u", nsec, coal[16], coal[6],
+                    coal[7], coal[8]);
+        }
+    }
+    LogInfo("OnItem catalog done");
 }
 
 void TryFireItemsPoll() {
@@ -1173,13 +1308,42 @@ void RaiseCharactersFromLoad() {
     g_chars_fired.store(0, std::memory_order_release);
 }
 
+void RaiseItemCatalogOnSpawn() {
+    ScanBattleItemTables();
+    if (g_battle_sec3_n == 0) {
+        return;
+    }
+    if (g_battle_items_applied.load(std::memory_order_acquire) != 0) {
+        bool stale = false;
+        for (unsigned i = 0; i < g_battle_sec3_n; ++i) {
+            auto* coal = g_battle_sec3[i] + 63u * kWindtRecSize;
+            if (!PtrReadable(coal, kWindtRecSize) || Read16(coal) != 64) {
+                continue;
+            }
+            // Vanilla rusty knife icon 21 / p2 1 — BBG recopied after our patch.
+            if (coal[6] == 21 || coal[16] == 1) {
+                stale = true;
+                break;
+            }
+        }
+        if (!stale) {
+            return;
+        }
+    }
+    FireItemCatalog();
+    g_battle_items_applied.store(1, std::memory_order_release);
+}
+
 void RaiseMagicCatalog() {
     g_magic_spawn_done.store(0, std::memory_order_release);
+    ResetBattleItemTables();
     FireMagicCatalog();
+    FireItemCatalog();
 }
 
 void RaiseMagicCatalogOnSpawn() {
     FireMagicCatalog();
+    RaiseItemCatalogOnSpawn();
 }
 
 }  // namespace grandia_mod

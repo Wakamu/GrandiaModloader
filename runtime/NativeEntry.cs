@@ -253,7 +253,7 @@ public unsafe struct CharacterNative
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
-public struct ItemNative
+public unsafe struct ItemNative
 {
     public int Id;
     public int Cost;
@@ -271,6 +271,21 @@ public struct ItemNative
     public int SellPrice;
     public int Effect;
     public int EffectValue;
+    public int Unknown8;
+    public int Unknown11;
+    public int Unknown12;
+    public int Unknown13;
+    public int Unknown14;
+    public int Unknown27;
+}
+
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
+public unsafe struct Text1Native
+{
+    public uint Src;
+    public int SrcLen;
+    public uint Dest;
+    public int DestLen;
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
@@ -292,6 +307,8 @@ public unsafe struct MagicNative
     public int Mode;
     public int Crit;
     public fixed byte Name[32];
+    public int Radius;
+    public int Distance;
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
@@ -321,6 +338,59 @@ public unsafe struct MapFileNative
 
 public static unsafe class NativeEntry
 {
+    [UnmanagedCallersOnly(EntryPoint = "GrandiaRuntimePatchText1", CallConvs = [typeof(CallConvCdecl)])]
+    public static int PatchText1(Text1Native* req)
+    {
+        if (req == null || req->Src == 0 || req->SrcLen <= 0)
+        {
+            return -1;
+        }
+
+        try
+        {
+            var src = CopyBytes((byte*)req->Src, req->SrcLen);
+            var tables = ItemTextBin.Parse(src);
+            for (var id = 1; id <= ItemTextBin.ItemCount; id++)
+            {
+                var ev = new ItemEvent(id, 0, 0, 0);
+                ev.SeedText(tables.Names[id - 1], tables.ShortNames[id - 1], tables.Descriptions[id - 1]);
+                ModHost.OnItem(ev, NativeLog);
+                if (ev.NameSet)
+                {
+                    tables.Names[id - 1] = ev.Name;
+                }
+
+                if (ev.ShortNameSet)
+                {
+                    tables.ShortNames[id - 1] = ev.ShortName;
+                }
+
+                if (ev.DescriptionSet)
+                {
+                    tables.Descriptions[id - 1] = ev.Description;
+                }
+            }
+
+            var result = ItemTextBin.PatchInPlace(src, tables);
+            if (result.Data.Length != src.Length)
+            {
+                NativeLog($"PatchText1: in-place resized {src.Length} -> {result.Data.Length}");
+                return -1;
+            }
+
+            NativeLog($"PatchText1: in-place {src.Length} applied={result.Applied} skipped={result.Skipped}");
+            var pin = ModHost.PinText1(result.Data);
+            req->Dest = (uint)pin;
+            req->DestLen = result.Data.Length;
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            NativeLog($"PatchText1: {ex}");
+            return -1;
+        }
+    }
+
     [UnmanagedCallersOnly(EntryPoint = "GrandiaRuntimeGetMapFile", CallConvs = [typeof(CallConvCdecl)])]
     public static int GetMapFile(MapFileNative* req)
     {
@@ -735,6 +805,7 @@ public static unsafe class NativeEntry
         try
         {
             ModHost.OnTitleScreen(new TitleScreenEvent());
+            ModHost.TryApplyItemText1(NativeLog);
             return 0;
         }
         catch (Exception ex)
@@ -841,6 +912,12 @@ public static unsafe class NativeEntry
                 Para4Post = req->Para4Post,
                 Effect = (Skill)req->Effect,
                 EffectValue = req->EffectValue,
+                Unknown8 = req->Unknown8,
+                Unknown11 = req->Unknown11,
+                Unknown12 = req->Unknown12,
+                Unknown13 = req->Unknown13,
+                Unknown14 = req->Unknown14,
+                Unknown27 = req->Unknown27,
             };
             ModHost.OnItem(ev, NativeLog);
             req->Cost = ev.Cost;
@@ -858,6 +935,12 @@ public static unsafe class NativeEntry
             req->Para2Post = ev.Para2Post;
             req->Para3Post = ev.Para3Post;
             req->Para4Post = ev.Para4Post;
+            req->Unknown8 = ev.Unknown8;
+            req->Unknown11 = ev.Unknown11;
+            req->Unknown12 = ev.Unknown12;
+            req->Unknown13 = ev.Unknown13;
+            req->Unknown14 = ev.Unknown14;
+            req->Unknown27 = ev.Unknown27;
             return 0;
         }
         catch (Exception ex)
@@ -900,27 +983,31 @@ public static unsafe class NativeEntry
             var ev = new MagicEvent(req->Id, name, element, req->CharacterMask, reqs)
             {
                 Power = req->Power,
-                IpCost = req->IpCost,
+                Speed = req->IpCost,
                 Cost = req->Cost,
                 IpKnockback = req->Area,
-                Range = req->Range,
+                Exp = req->Range,
+                Radius = req->Radius,
+                Distance = req->Distance,
                 ElementFlags = req->ElementFlags,
                 Effect = (EffectType)req->Effect,
                 Mode = req->Mode,
-                CriticalChance = req->Crit,
+                CancelChance = req->Crit,
             };
             ModHost.OnMagic(ev, NativeLog);
             req->Element = (int)ev.Element;
             req->CharacterMask = ev.CharacterMask;
             req->Power = ev.Power;
-            req->IpCost = ev.IpCost;
+            req->IpCost = ev.Speed;
             req->Cost = ev.Cost;
             req->Area = ev.IpKnockback;
-            req->Range = ev.Range;
+            req->Range = ev.Exp;
+            req->Radius = ev.Radius;
+            req->Distance = ev.Distance;
             req->ElementFlags = ev.ElementFlags;
             req->Effect = (int)ev.Effect;
             req->Mode = ev.Mode;
-            req->Crit = ev.CriticalChance;
+            req->Crit = ev.CancelChance;
             var outN = 0;
             foreach (var r in ev.Requirements)
             {
@@ -1289,11 +1376,12 @@ public static unsafe class NativeEntry
                 var id = req->Items[i];
                 if (id > 0)
                 {
-                    ev.Prices[(Item)id] = req->Prices[i];
+                    ev.SeedPrice((Item)id, req->Prices[i]);
                 }
             }
 
             ModHost.OnShopOpen(ev, NativeLog);
+            ModHost.TryApplyItemText1(NativeLog);
             for (var p = 0; p < ShopOpenEvent.PageCount; p++)
             {
                 var list = ev.Page(p);
@@ -1307,7 +1395,9 @@ public static unsafe class NativeEntry
 
                     var slot = p * ShopOpenEvent.SlotsPerPage + i;
                     req->Items[slot] = id;
-                    req->Prices[slot] = id > 0 ? ev.GetPrice((Item)id) : 0;
+                    req->Prices[slot] = id > 0 && ev.HasPriceOverride((Item)id)
+                        ? ev.GetPrice((Item)id)
+                        : -1;
                 }
             }
 
@@ -1400,6 +1490,26 @@ public static unsafe class NativeEntry
         }
 
         return len == 0 ? "" : Encoding.UTF8.GetString(ptr, len);
+    }
+
+    private static void WriteFixedUtf8(byte* ptr, int max, string value)
+    {
+        if (ptr == null || max <= 0)
+        {
+            return;
+        }
+
+        var bytes = Encoding.UTF8.GetBytes(value ?? "");
+        var n = bytes.Length < max ? bytes.Length : max - 1;
+        for (var i = 0; i < n; i++)
+        {
+            ptr[i] = bytes[i];
+        }
+
+        for (var i = n; i < max; i++)
+        {
+            ptr[i] = 0;
+        }
     }
 
     private static byte[] CopyEncounter(BattleLoadNative* req)

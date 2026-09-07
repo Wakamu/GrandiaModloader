@@ -7,6 +7,24 @@ namespace Grandia.Sdk;
 public enum Item
 {
     None = 0,
+    /// <summary>Life Jewel (<c>1</c>). Unused in vanilla; Redux fill.</summary>
+    LifeJewel = 1,
+    /// <summary>Mage Hat (<c>2</c>). Unused in vanilla; Redux fill.</summary>
+    MageHat = 2,
+    /// <summary>Yoyo (<c>3</c>). Unused in vanilla; Redux fill.</summary>
+    Yoyo = 3,
+    /// <summary>Basic Wand (<c>4</c>). Unused in vanilla; Redux fill.</summary>
+    BasicWand = 4,
+    /// <summary>ReDux Wand (<c>5</c>). Unused in vanilla; Redux fill.</summary>
+    ReduxWand = 5,
+    /// <summary>Lord's Wand (<c>6</c>). Unused in vanilla; Redux fill.</summary>
+    LordsWand = 6,
+    /// <summary>Magic Rope (<c>7</c>). Unused in vanilla; Redux fill.</summary>
+    MagicRope = 7,
+    /// <summary>Lure's Heart (<c>8</c>). Unused in vanilla; Redux fill.</summary>
+    LuresHeart = 8,
+    /// <summary>Enchanted Whip (<c>9</c>). Unused in vanilla; Redux fill.</summary>
+    EnchantedWhip = 9,
     /// <summary>Spirit Stone (<c>10</c>).</summary>
     SpiritStone = 10,
     /// <summary>Hero's Armband (<c>11</c>).</summary>
@@ -83,6 +101,16 @@ public enum Item
     FrostHerb = 46,
     /// <summary>Amulet of Relief (<c>47</c>).</summary>
     AmuletOfRelief = 47,
+    /// <summary>Gaia Wand (<c>48</c>). Unused in vanilla; Redux fill.</summary>
+    GaiaWand = 48,
+    /// <summary>Agile Shoes (<c>49</c>). Unused in vanilla; Redux fill.</summary>
+    AgileShoes = 49,
+    /// <summary>Agile Hat (<c>50</c>). Unused in vanilla; Redux fill.</summary>
+    AgileHat = 50,
+    /// <summary>Camping Tent (<c>51</c>). Unused in vanilla; Redux fill.</summary>
+    CampingTent = 51,
+    /// <summary>Adventure Bow (<c>62</c>). Unused in vanilla; Redux fill.</summary>
+    AdventureBow = 62,
     /// <summary>Knife of Judgment (<c>63</c>).</summary>
     KnifeOfJudgment = 63,
     /// <summary>Rusty Knife (<c>64</c>).</summary>
@@ -845,6 +873,8 @@ public enum Item
     RescueSet = 446,
     /// <summary>Black Nail Polish (<c>447</c>).</summary>
     BlackNailPolish = 447,
+    /// <summary>Spirit Whip (<c>448</c>). Unused in vanilla; Redux fill.</summary>
+    SpiritWhip = 448,
     /// <summary>Thor's Fury (<c>449</c>).</summary>
     ThorsFury = 449,
     /// <summary>Magic Lipstick (<c>450</c>).</summary>

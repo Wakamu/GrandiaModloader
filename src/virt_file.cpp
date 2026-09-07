@@ -15,6 +15,9 @@
 #include <vector>
 
 namespace grandia_mod {
+
+std::vector<std::uint8_t> g_text1;
+
 namespace {
 
 using FopenFn = FILE*(__cdecl*)(const char*, const char*);
@@ -165,7 +168,17 @@ bool ParseMapPath(const char* path, std::string* stem, int* kind) {
     return true;
 }
 
+bool IsText1Path(const char* path) {
+    const std::string base = Basename(path);
+    return _stricmp(base.c_str(), "TEXT1.BIN") == 0;
+}
+
 bool LookupBytes(const char* path, const void** data, int* len) {
+    if (IsText1Path(path) && !g_text1.empty() && data && len) {
+        *data = g_text1.data();
+        *len = static_cast<int>(g_text1.size());
+        return true;
+    }
     std::string stem;
     int kind = -1;
     if (!ParseMapPath(path, &stem, &kind)) {
@@ -421,6 +434,27 @@ void* __cdecl HookSdlRwFromFile(const char* path, const char* mode) {
 
 void VirtFileSetOrigFopen(FILE*(__cdecl* fopen_fn)(const char*, const char*)) {
     g_orig_fopen = fopen_fn;
+}
+
+void VirtFileSetText1(const std::uint8_t* data, std::size_t len) {
+    if (!data || len == 0) {
+        g_text1.clear();
+        return;
+    }
+    g_text1.assign(data, data + len);
+}
+
+bool VirtFileHasText1() {
+    return !g_text1.empty();
+}
+
+extern "C" int ModSetText1(const void* data, int len) {
+    if (!data || len <= 0) {
+        return 0;
+    }
+    VirtFileSetText1(static_cast<const std::uint8_t*>(data), static_cast<std::size_t>(len));
+    LogInfo("TEXT1 virt %d bytes", len);
+    return 1;
 }
 
 FILE* VirtFileOpen(const char* path, const char* mode) {
