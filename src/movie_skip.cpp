@@ -51,8 +51,6 @@ bool InstallMovieSkipHook() {
     std::memcpy(g_allow_je_original, site, 2);
     RestoreBytes(site, kSkipAllowJeNops, 2);
     g_allow_je_site = site;
-    LogInfo("OnMovieSkip: Start skips any FMV (NOP je at +0x%X)",
-            static_cast<unsigned>(CallerRva(reinterpret_cast<std::uintptr_t>(site))));
     return true;
 }
 

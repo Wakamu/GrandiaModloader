@@ -7,6 +7,10 @@ namespace Grandia.Sdk;
 /// <summary>
 /// In-process port of <c>field_script_dialog_markup.py</c>: tokens ↔ editor markup.
 /// Unchanged markup is a no-op on the original token list.
+/// <c>[color:yellow]</c> is 0A 00 C0 (nibble C on transparent). The third
+/// byte is fg nibble in the high 4 bits and letter-background in the low 4.
+/// <c>[color:yellow:black]</c> is C1. <c>[color]</c> / <c>[color:white]</c>
+/// restore F0. Vanilla English only stores C0 and D0.
 /// </summary>
 public static class DialogueMarkup
 {
@@ -18,8 +22,8 @@ public static class DialogueMarkup
     private static readonly HashSet<int> StillSlots = [0x03, 0x12, 0x21];
     private static readonly HashSet<int> HeaderExtraSkip = [0x00, 0x02, 0x06];
     private static readonly HashSet<int> PrintableExtra = CreatePrintableExtra();
-    private static readonly Dictionary<int, string> TextGlyphs = new() { [0xD7] = "♥" };
-    private static readonly Dictionary<char, int> TextGlyphBytes = new() { ['♥'] = 0xD7 };
+    private static readonly Dictionary<int, string> TextGlyphs = CreateTextGlyphs();
+    private static readonly Dictionary<char, int> TextGlyphBytes = CreateTextGlyphBytes();
 
     private static readonly Regex TokenRe = new(
         @"\[\[|" +
@@ -36,6 +40,9 @@ public static class DialogueMarkup
         @"\[menu\]|" +
         @"\[overlay\]|" +
         @"\[/overlay\]|" +
+        @"\[color(?::[^\]]+)?\]|" +
+        @"\[/color\]|" +
+        @"\[yellow\]|" +
         @"\[raw:[0-9a-fA-F]+\]|" +
         @"\[line\]|" +
         @"\[09:[0-9A-Fa-f]{1,2}(?::(?:0x[0-9A-Fa-f]+|\d+))?\]|" +
@@ -56,6 +63,64 @@ public static class DialogueMarkup
     private static readonly Regex EndRe = new(@"\[end(?::([0-9a-fA-F]*))?\]", RegexOptions.CultureInvariant);
     private static readonly Regex HdrRe = new(@"\[hdr:([0-9a-fA-F]+)\]", RegexOptions.CultureInvariant);
     private static readonly Regex RawRe = new(@"\[raw:([0-9a-fA-F]+)\]", RegexOptions.CultureInvariant);
+    private static readonly Regex ColorRe = new(
+        @"\[(?:/color|yellow|color(?::([^\]]+))?)\]",
+        RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+
+    public const int ColorYellow = 0xC0;
+    public const int ColorGrey = 0xD0;
+    public const int ColorWhite = 0xF0;
+
+    /// <summary>
+    /// Printer palette, nibble 0..F. Low nibble of the color byte is the
+    /// same table used as the glyph background (0 = transparent).
+    /// </summary>
+    private static readonly string[] ColorNibbleNames =
+    [
+        "transparent", "black", "red", "pink",
+        "turquoise", "asparagus", "argent", "bright",
+        "purple", "green", "darkred", "dim",
+        "yellow", "grey", "blue", "white",
+    ];
+
+    private static readonly Dictionary<string, int> ColorNibbleAliases = CreateColorNibbleAliases();
+
+    /// <summary>
+    /// Latin codefont extras (HD <c>codefonts_codefonts</c>). Stream byte
+    /// is the SPRIV footer key low 16 bits, not the atlas packing index.
+    /// 0x80–0x9F are katakana (Gaia babble); D7–DA are symbols.
+    /// JA/KR/SC/TC use other atlases with 2-byte codes.
+    /// </summary>
+    private const string LatinKana80 = "ァィゥェォャュョッアカガキギクグケゲコゴサザシジスズセゼソゾタダ";
+
+    private static Dictionary<int, string> CreateTextGlyphs()
+    {
+        var d = new Dictionary<int, string>();
+        for (var i = 0; i < LatinKana80.Length; i++)
+        {
+            d[0x80 + i] = LatinKana80[i].ToString();
+        }
+
+        d[0xD5] = "ー";
+        d[0xD6] = "〜";
+        d[0xD7] = "♥";
+        d[0xD8] = "○";
+        d[0xD9] = "♪";
+        d[0xDA] = "♫";
+        return d;
+    }
+
+    private static Dictionary<char, int> CreateTextGlyphBytes()
+    {
+        var d = new Dictionary<char, int>();
+        foreach (var (b, s) in TextGlyphs)
+        {
+            d[s[0]] = b;
+        }
+
+        return d;
+    }
+
     private static readonly Regex KeyLegacyRe = new(@"\[K:(0x[0-9A-Fa-f]+|\d+)\]", RegexOptions.CultureInvariant);
 
     public static string FromPayload(ReadOnlySpan<byte> payload, bool type8 = false, string? mapStem = null) =>
@@ -320,6 +385,13 @@ public static class DialogueMarkup
                 if (RawBelongsToHeader(tokens, i))
                 {
                     i += 1;
+                    continue;
+                }
+
+                if (TryColorPacket(tokens, i, out var color))
+                {
+                    outb.Append(FormatColor(color));
+                    i += 3;
                     continue;
                 }
 
@@ -688,6 +760,13 @@ public static class DialogueMarkup
                 case EvEnd end:
                     endPad = end.Pad;
                     break;
+                case EvColor col:
+                    FlushSwap();
+                    FlushPendingOverlay();
+                    output.Add(new RawByteToken(0x0A));
+                    output.Add(new RawByteToken(0x00));
+                    output.Add(new RawByteToken(col.Code));
+                    break;
                 case EvRaw raw:
                     FlushSwap();
                     FlushPendingOverlay();
@@ -950,6 +1029,12 @@ public static class DialogueMarkup
                 var hm = HdrRe.Match(tok);
                 var raw = Convert.FromHexString(hm.Groups[1].Value);
                 events.Add(new EvHdr(raw[0], raw[1], raw[2], raw[3], raw[4]));
+            }
+            else if (tok.StartsWith("[color", StringComparison.OrdinalIgnoreCase)
+                || tok.Equals("[/color]", StringComparison.OrdinalIgnoreCase)
+                || tok.Equals("[yellow]", StringComparison.OrdinalIgnoreCase))
+            {
+                events.Add(new EvColor(ParseColor(tok)));
             }
             else if (tok.StartsWith("[raw:", StringComparison.Ordinal))
             {
@@ -1226,6 +1311,20 @@ public static class DialogueMarkup
         i >= 0 && i < tokens.Count && tokens[i] is RawByteToken { Value: 0x05 } &&
         !IsHeaderFaceExtra(tokens, i);
 
+    /// <summary>True if the stream has choice-menu mode (not a [P:4] face extra).</summary>
+    internal static bool HasMenuControl(IReadOnlyList<DialogueToken> tokens)
+    {
+        for (var i = 0; i < tokens.Count; i++)
+        {
+            if (IsStreamMenu(tokens, i))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private static bool IsNamedStreamRaw(IReadOnlyList<DialogueToken> tokens, int i)
     {
         if (i < 0 || i >= tokens.Count || tokens[i] is not RawByteToken raw)
@@ -1238,8 +1337,131 @@ public static class DialogueMarkup
             return true;
         }
 
+        if (TryColorPacket(tokens, i, out _))
+        {
+            return true;
+        }
+
         return IsStreamMenu(tokens, i) || IsOverlayOpen(tokens, i) || IsExclusiveSwap(tokens, i) ||
                RawBelongsToHeader(tokens, i);
+    }
+
+    /// <summary>
+    /// Inline 3-byte color: <c>0A 00 XX</c>. XX is <c>(fg &lt;&lt; 4) | bg</c>
+    /// into the 16-entry printer palette. Vanilla only stores
+    /// <see cref="ColorYellow"/> / <see cref="ColorGrey"/>.
+    /// </summary>
+    private static bool TryColorPacket(IReadOnlyList<DialogueToken> tokens, int i, out int code)
+    {
+        code = 0;
+        if (i + 2 >= tokens.Count
+            || tokens[i] is not RawByteToken { Value: 0x0A }
+            || tokens[i + 1] is not RawByteToken { Value: 0x00 }
+            || tokens[i + 2] is not RawByteToken third)
+        {
+            return false;
+        }
+
+        code = third.Value;
+        return true;
+    }
+
+    private static Dictionary<string, int> CreateColorNibbleAliases()
+    {
+        var d = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        for (var i = 0; i < ColorNibbleNames.Length; i++)
+        {
+            d[ColorNibbleNames[i]] = i;
+            d[i.ToString("X")] = i;
+        }
+
+        d["none"] = 0;
+        d["clear"] = 0;
+        d["magenta"] = 3;
+        d["teal"] = 4;
+        d["olive"] = 5;
+        d["silver"] = 6;
+        d["maroon"] = 10;
+        d["dark-red"] = 10;
+        d["darkgrey"] = 11;
+        d["darkgray"] = 11;
+        d["charcoal"] = 11;
+        d["gray"] = 13;
+        d["default"] = 15;
+        return d;
+    }
+
+    private static string FormatColor(int code)
+    {
+        if ((code & 0xFF) == ColorWhite)
+        {
+            return "[color]";
+        }
+
+        var fg = (code >> 4) & 0xF;
+        var bg = code & 0xF;
+        var fgName = ColorNibbleNames[fg];
+        return bg == 0 ? $"[color:{fgName}]" : $"[color:{fgName}:{ColorNibbleNames[bg]}]";
+    }
+
+    private static int ParseColor(string tok)
+    {
+        var m = ColorRe.Match(tok);
+        if (!m.Success)
+        {
+            throw new ArgumentException($"Unknown markup token {tok}");
+        }
+
+        if (!m.Groups[1].Success)
+        {
+            return tok.Equals("[yellow]", StringComparison.OrdinalIgnoreCase)
+                ? ColorYellow
+                : ColorWhite;
+        }
+
+        return ParseColorSpec(m.Groups[1].Value);
+    }
+
+    private static int ParseColorSpec(string spec)
+    {
+        if (spec.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
+            || spec.StartsWith("0X", StringComparison.Ordinal))
+        {
+            return ParseInt(spec) & 0xFF;
+        }
+
+        var colon = spec.IndexOf(':');
+        if (colon >= 0)
+        {
+            return (ParseColorNibble(spec[..colon]) << 4) | ParseColorNibble(spec[(colon + 1)..]);
+        }
+
+        if (ColorNibbleAliases.TryGetValue(spec, out var nibble))
+        {
+            return nibble << 4;
+        }
+
+        if (spec.Length == 2 && spec.All(Uri.IsHexDigit))
+        {
+            return Convert.ToInt32(spec, 16) & 0xFF;
+        }
+
+        if (int.TryParse(spec, NumberStyles.Integer, CultureInfo.InvariantCulture, out var dec))
+        {
+            return dec & 0xFF;
+        }
+
+        throw new ArgumentException($"Unknown color {spec}");
+    }
+
+    private static int ParseColorNibble(string raw)
+    {
+        if (ColorNibbleAliases.TryGetValue(raw, out var nibble))
+        {
+            return nibble;
+        }
+
+        throw new ArgumentException($"Unknown color nibble {raw}");
     }
 
     private static bool MenuOpenerNeedsFix(IReadOnlyList<DialogueToken> tokens)
@@ -1513,7 +1735,8 @@ public static class DialogueMarkup
                 return events[start] is not EvPortrait { Expr: 1 };
             }
 
-            if (ev is EvLine or EvVoice or EvCtrl09 or EvFaceKey or EvDelay or EvWait or EvBox)
+            if (ev is EvLine or EvVoice or EvCtrl09 or EvFaceKey or EvDelay or EvWait or EvBox
+                or EvColor)
             {
                 continue;
             }
@@ -1701,6 +1924,7 @@ public static class DialogueMarkup
     private sealed record EvMenu;
     private sealed record EvFaceKey(int Key);
     private sealed record EvRaw(byte[] Data);
+    private sealed record EvColor(int Code);
     private sealed record EvLine;
     private sealed record EvCtrl09(int Sub, int? Arg);
     private sealed record EvEnd(byte[] Pad);

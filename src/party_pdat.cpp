@@ -223,8 +223,7 @@ const std::vector<std::uint8_t>* GetCachedPdat() {
             return nullptr;
         }
         state = 1;
-        LogInfo("Party P_DAT: cached %u bytes from %s", static_cast<unsigned>(cached.size()),
-                pdat_path);
+
     }
     return state == 1 ? &cached : nullptr;
 }
@@ -256,8 +255,6 @@ const std::vector<std::uint8_t>* GetCachedCharpack() {
             return nullptr;
         }
         state = 1;
-        LogInfo("Party charpack: %s (%u entries, %u bytes)", path, hdr->count,
-                static_cast<unsigned>(cached.size()));
     }
     return state == 1 ? &cached : nullptr;
 }
@@ -413,6 +410,7 @@ void FreePdatSlotAllocs() {
 
 bool TryInstallContiguousCharpack(std::uint8_t* c8a, std::uint32_t c8a_abs, unsigned n,
                                   const std::uint8_t* ids, const char* tag) {
+    (void)tag;
     const std::vector<std::uint8_t>* charpack = GetCachedCharpack();
     if (!charpack || n == 0 || n > 4) {
         return false;
@@ -482,12 +480,7 @@ bool TryInstallContiguousCharpack(std::uint8_t* c8a, std::uint32_t c8a_abs, unsi
     }
 
     g_pack_rebuilt = true;
-    LogInfo("Party P_DAT contiguous [%s] n=%u bytes=%u c8a0=%u,%u,%u,%u", tag ? tag : "?", n,
-            pack_size,
-            *reinterpret_cast<std::uint32_t*>(c8a),
-            *reinterpret_cast<std::uint32_t*>(c8a + 4),
-            *reinterpret_cast<std::uint32_t*>(c8a + 8),
-            *reinterpret_cast<std::uint32_t*>(c8a + 12));
+
     return true;
 }
 
@@ -581,15 +574,9 @@ void FixupAllyAnimPointers(void* combatant, unsigned c8a_slot) {
         LogWarn("Party anim fixup: +0x98=%08X +0x164=%08X not readable slot=%u", p98, p164, slot);
         return;
     }
-    const std::uint32_t cur98 = *reinterpret_cast<std::uint32_t*>(actor + 0x98);
-    const bool changed = cur98 != p98;
     *reinterpret_cast<std::uint32_t*>(actor + 0x98) = p98;
     *reinterpret_cast<std::uint32_t*>(actor + 0x9C) = p9c;
     *reinterpret_cast<std::uint32_t*>(actor + 0x164) = p164;
-    if (changed) {
-        LogInfo("Party anim fixup: slot=%u char=%u a15a=%u +98 %08X->%08X", slot, actor[0x10F],
-                actor[0x15A], cur98, p98);
-    }
 }
 
 void TrySplicePdatPlayables(const std::uint8_t* ids, unsigned n, const char* tag) {
@@ -639,7 +626,6 @@ void TrySplicePdatPlayables(const std::uint8_t* ids, unsigned n, const char* tag
         const std::uint8_t* src = nullptr;
         std::uint32_t span = 0;
         std::uint32_t hdr_rel[4]{};
-        const char* src_tag = nullptr;
 
         if (charpack) {
             const Gpd1Entry* ent = FindCharpackEntry(*charpack, char_id);
@@ -649,7 +635,6 @@ void TrySplicePdatPlayables(const std::uint8_t* ids, unsigned n, const char* tag
                 for (int i = 0; i < 4; ++i) {
                     hdr_rel[i] = ent->hdr[i];
                 }
-                src_tag = "charpack";
             }
         }
         if (!src && pdat) {
@@ -680,7 +665,6 @@ void TrySplicePdatPlayables(const std::uint8_t* ids, unsigned n, const char* tag
             for (int i = 0; i < 4; ++i) {
                 hdr_rel[i] = hdr[i] - data_start;
             }
-            src_tag = "P_DAT";
         }
         if (!src || span == 0) {
             LogWarn("Party P_DAT rebuild: no blob for char=%u (%s)", char_id, CharName(char_id));
@@ -704,15 +688,14 @@ void TrySplicePdatPlayables(const std::uint8_t* ids, unsigned n, const char* tag
         for (int i = 0; i < 4; ++i) {
             dst[i] = base_rel + hdr_rel[i];
         }
-        LogInfo("Party P_DAT rebuild [%s]: slot=%u char=%u (%s) via=%s span=%u", tag ? tag : "?",
-                slot, char_id, CharName(char_id), src_tag ? src_tag : "?", span);
+
         ++built;
     }
     if (n < 4u) {
         auto* term = reinterpret_cast<std::uint32_t*>(c8a + static_cast<std::uint32_t>(n) * 0x10u);
         term[0] = term[1] = term[2] = term[3] = 0x40u;
     }
-    LogInfo("Party P_DAT rebuild [%s]: external built=%d/%u", tag ? tag : "?", built, n);
+
 }
 
 }  // namespace grandia_mod

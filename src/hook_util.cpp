@@ -1,5 +1,11 @@
 #include "hook_util.h"
 
+#include <cctype>
+#include <cstring>
+#include <mutex>
+#include <string>
+#include <unordered_map>
+
 namespace grandia_mod {
 
 bool BytesMatch(const std::uint8_t* data, const std::uint8_t* expected, std::size_t size) {
@@ -206,6 +212,172 @@ bool SafeWriteByte(std::uintptr_t address, std::uint8_t value) {
     }
     VirtualProtect(reinterpret_cast<void*>(address), 1, old_protect, &old_protect);
     return ok;
+}
+
+void ReadMsvcString(std::uintptr_t str, char* dest, int dest_len) {
+    if (!dest || dest_len <= 0) {
+        return;
+    }
+    dest[0] = 0;
+    if (str == 0) {
+        return;
+    }
+    std::uint32_t cap = 0;
+    std::uint32_t size = 0;
+    if (!SafeReadU32(str + 0x14, &cap) || !SafeReadU32(str + 0x10, &size)) {
+        return;
+    }
+    if (size == 0 || size > 259 || cap > 0x10000u || (cap < 0x10u && size > 15u) ||
+        (cap >= 0x10u && size > cap)) {
+        return;
+    }
+    std::uintptr_t p = str;
+    if (cap >= 0x10) {
+        void* heap = nullptr;
+        if (!SafeReadPointer(str, &heap) || !heap) {
+            return;
+        }
+        p = reinterpret_cast<std::uintptr_t>(heap);
+    }
+    if (size >= static_cast<std::uint32_t>(dest_len)) {
+        size = static_cast<std::uint32_t>(dest_len - 1);
+    }
+    for (std::uint32_t i = 0; i < size; ++i) {
+        std::uint8_t b = 0;
+        if (!SafeReadByte(p + i, &b)) {
+            dest[i] = 0;
+            return;
+        }
+        dest[i] = static_cast<char>(b);
+    }
+    dest[size] = 0;
+}
+
+namespace {
+
+bool LooksLikeHdPath(const char* path) {
+    if (!path || !path[0]) {
+        return false;
+    }
+    char lower[260]{};
+    int n = 0;
+    for (; path[n] && n < 259; ++n) {
+        const unsigned char c = static_cast<unsigned char>(path[n]);
+        if (c < 32 || c > 126) {
+            return false;
+        }
+        lower[n] = static_cast<char>(std::tolower(c));
+    }
+    if (n < 5) {
+        return false;
+    }
+    return std::strstr(lower, "__atlas") != nullptr || std::strstr(lower, "__spriteinfo") != nullptr;
+}
+
+void CopyPath(char* dest, int dest_len, const char* src) {
+    if (!dest || dest_len <= 0) {
+        return;
+    }
+    dest[0] = 0;
+    if (!src) {
+        return;
+    }
+    int i = 0;
+    for (; src[i] && i < dest_len - 1; ++i) {
+        dest[i] = src[i];
+    }
+    dest[i] = 0;
+}
+
+}  // namespace
+
+bool ReadHdAssetPath(std::uintptr_t object, char* dest, int dest_len) {
+    if (!dest || dest_len <= 0) {
+        return false;
+    }
+    dest[0] = 0;
+    if (object == 0) {
+        return false;
+    }
+
+    constexpr std::uintptr_t kOffs[] = {0x38u, 0x18u, 0x00u, 0x30u, 0x48u};
+    for (std::uintptr_t off : kOffs) {
+        char tmp[260]{};
+        ReadMsvcString(object + off, tmp, sizeof(tmp));
+        if (LooksLikeHdPath(tmp)) {
+            CopyPath(dest, dest_len, tmp);
+            return true;
+        }
+    }
+    return false;
+}
+
+namespace {
+
+std::mutex g_hd_path_mu;
+char g_last_spriteinfo[260]{};
+std::unordered_map<std::uintptr_t, std::string> g_object_paths;
+
+bool HasSpriteInfoMark(const char* path) {
+    if (!path || !path[0]) {
+        return false;
+    }
+    char lower[260]{};
+    int n = 0;
+    for (; path[n] && n < 259; ++n) {
+        lower[n] = static_cast<char>(std::tolower(static_cast<unsigned char>(path[n])));
+    }
+    return std::strstr(lower, "__spriteinfo") != nullptr;
+}
+
+}  // namespace
+
+void NoteHdAssetPath(const char* path) {
+    if (!HasSpriteInfoMark(path)) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(g_hd_path_mu);
+    CopyPath(g_last_spriteinfo, sizeof(g_last_spriteinfo), path);
+}
+
+bool LastHdSpriteInfoPath(char* dest, int dest_len) {
+    std::lock_guard<std::mutex> lock(g_hd_path_mu);
+    if (!g_last_spriteinfo[0]) {
+        if (dest && dest_len > 0) {
+            dest[0] = 0;
+        }
+        return false;
+    }
+    CopyPath(dest, dest_len, g_last_spriteinfo);
+    return true;
+}
+
+void BindHdObjectPath(std::uintptr_t object) {
+    if (object == 0) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(g_hd_path_mu);
+    if (!g_last_spriteinfo[0]) {
+        return;
+    }
+    if (g_object_paths.size() >= 512) {
+        g_object_paths.clear();
+    }
+    g_object_paths[object] = g_last_spriteinfo;
+}
+
+bool LookupHdObjectPath(std::uintptr_t object, char* dest, int dest_len) {
+    if (object == 0 || !dest || dest_len <= 0) {
+        return false;
+    }
+    dest[0] = 0;
+    std::lock_guard<std::mutex> lock(g_hd_path_mu);
+    auto it = g_object_paths.find(object);
+    if (it == g_object_paths.end() || it->second.empty()) {
+        return false;
+    }
+    CopyPath(dest, dest_len, it->second.c_str());
+    return true;
 }
 
 bool SafeWriteU32(std::uintptr_t address, std::uint32_t value) {

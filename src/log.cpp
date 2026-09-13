@@ -76,7 +76,7 @@ void InitializeLogging() {
 
     g_log_ready = true;
     WriteBootMarker("[GrandiaMod] DllMain: logging initialized");
-    LogInfo("Log file: %s", g_log_path);
+
 }
 
 void ShutdownLogging() {

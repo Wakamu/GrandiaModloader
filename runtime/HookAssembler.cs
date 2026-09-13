@@ -37,7 +37,6 @@ internal static class HookAssembler
             Cache[key] = bytes;
         }
 
-        log?.Invoke($"assemble hook {hookId} on {stem} ({bytes.Length} bytes)");
         return bytes;
     }
 

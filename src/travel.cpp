@@ -12,6 +12,8 @@
 #include <cstring>
 
 extern "C" int ModFlagGet(unsigned event_id);
+extern "C" int ModMenuIsOpen();
+extern "C" int ModMenuClose();
 extern "C" std::uint8_t g_mod_wm_picture[32] = {
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
@@ -453,7 +455,7 @@ bool InstallWideTables(std::uintptr_t base) {
 #endif
 
     g_wide_patched = true;
-    LogInfo("OnWorldMapLoad: 32 icon/dest slots (custom plates for 16+)");
+
     return true;
 }
 
@@ -1336,7 +1338,6 @@ bool InstallWorldMapHook() {
     }
     std::memcpy(g_mod_wm_orig_mov_eax, g_wm_original, 5);
     g_wm_site = site;
-    LogInfo("OnWorldMapConfirm hook at grandia.exe+0x%X", static_cast<unsigned>(kWorldMapConfirmRva));
 
     auto* load = reinterpret_cast<std::uint8_t*>(base + kWorldMapLoadRva);
     if (!IsExecutableAddress(load) || load[0] != 0x55 || load[1] != 0x8B || load[2] != 0xEC ||
@@ -1371,7 +1372,6 @@ bool InstallWorldMapHook() {
     }
     g_wm_load_site = load;
     g_icon_count_site = icon;
-    LogInfo("OnWorldMapLoad hook at grandia.exe+0x%X", static_cast<unsigned>(kWorldMapLoadRva));
 
     auto* uv = reinterpret_cast<std::uint8_t*>(base + kWorldMapIconUvRva);
     if (!IsExecutableAddress(uv) || uv[0] != 0xC6 || uv[1] != 0x46 || uv[2] != 0x10) {
@@ -1384,7 +1384,7 @@ bool InstallWorldMapHook() {
     if (WriteJump(uv, reinterpret_cast<void*>(&ModWorldMapIconUvDetour), g_wm_pic_original,
                   kIconUvPatchSize)) {
         g_wm_pic_site = uv;
-        LogInfo("OnWorldMapLoad icon art hook at +0x%X", static_cast<unsigned>(kWorldMapIconUvRva));
+
     }
 
     auto* rows = reinterpret_cast<std::uint8_t*>(base + kWorldMapAmapRowsWriteRva);
@@ -1394,8 +1394,7 @@ bool InstallWorldMapHook() {
         if (WriteJump(rows, reinterpret_cast<void*>(&ModWorldMapAmapRowsDetour), g_wm_rows_original,
                       5)) {
             g_wm_rows_site = rows;
-            LogInfo("OnWorldMapLoad AMAP row-count hook at +0x%X",
-                    static_cast<unsigned>(kWorldMapAmapRowsWriteRva));
+
         }
     } else {
         LogWarn("AMAP row-count write bytes mismatch at +0x%X",
@@ -1408,8 +1407,7 @@ bool InstallWorldMapHook() {
         if (WriteJump(cursor_init, reinterpret_cast<void*>(&ModWorldMapCursorInitDetour),
                       g_wm_cursor_init_original, 5)) {
             g_wm_cursor_init_site = cursor_init;
-            LogInfo("OnWorldMapLoad cursor-start hook at +0x%X",
-                    static_cast<unsigned>(kWorldMapCursorInitRva));
+
         }
     } else {
         LogWarn("world-map cursor-start bytes mismatch at +0x%X",
@@ -1422,8 +1420,7 @@ bool InstallWorldMapHook() {
         if (WriteJump(loop_start, reinterpret_cast<void*>(&ModWmIconLoopStart),
                       g_wm_loop_start_original, 6)) {
             g_wm_loop_start_site = loop_start;
-            LogInfo("OnWorldMapLoad icon-loop count hook at +0x%X",
-                    static_cast<unsigned>(kWorldMapIconLoopStartRva));
+
         }
     } else {
         LogWarn("world-map icon-loop start bytes mismatch at +0x%X",
@@ -1435,8 +1432,7 @@ bool InstallWorldMapHook() {
         if (WriteJump(loop_end, reinterpret_cast<void*>(&ModWmIconLoopEnd), g_wm_loop_end_original,
                       7)) {
             g_wm_loop_end_site = loop_end;
-            LogInfo("OnWorldMapLoad icon-loop end overlay at +0x%X",
-                    static_cast<unsigned>(kWorldMapIconLoopEndRva));
+
         }
     } else {
         LogWarn("world-map icon-loop end bytes mismatch at +0x%X",
@@ -1782,7 +1778,6 @@ bool InstallMapTravelHook() {
         return false;
     }
     g_map_travel_site = site;
-    LogInfo("OnMapTravel hook at +0x614D0");
 
     auto* setup = reinterpret_cast<std::uint8_t*>(base + kSetupTravelRva);
     const std::uint8_t setup_expect[] = {0x89, 0x45, 0xFC, 0x0F, 0xB6, 0x42, 0x11};
@@ -1797,7 +1792,6 @@ bool InstallMapTravelHook() {
         return true;
     }
     g_setup_travel_site = setup;
-    LogInfo("OnMapTravel field setup hook at +0x72F93");
 
     g_mod_map_travel_fn = reinterpret_cast<void*>(base + kMapTravelRva);
     g_mod_clear_amap = reinterpret_cast<void*>(base + kClearAmapRva);
@@ -1848,10 +1842,109 @@ bool InstallMapTravelHook() {
                 static_cast<unsigned>(kOpenAmap2CallRva));
         return true;
     }
-    LogInfo("OnMapTravel world-map exit hook at +0x%X / +0x%X",
-            static_cast<unsigned>(kOpenAmapCallRva),
-            static_cast<unsigned>(kOpenAmap2CallRva));
+
     return true;
+#endif
+}
+
+namespace {
+
+constexpr std::uintptr_t kWarpBattleModeRva = 0x31CD4Bu;
+constexpr std::uintptr_t kWarpBusyByteRva = 0x31CD38u;
+constexpr std::uintptr_t kWarpMenuModeRva = 0x31942Cu;
+constexpr std::uintptr_t kWarpWmDestRva = 0x2C2990u;
+constexpr std::uintptr_t kWarpWmSpawnRva = 0x2C29C4u;
+constexpr std::uintptr_t kWarpWmConfirmRva = 0x241197u;
+
+volatile int g_warp_pending = 0;
+volatile std::uint32_t g_warp_dest = 0;
+volatile std::uint32_t g_warp_spawn = 0;
+volatile std::uint32_t g_warp_aux9 = 1;
+volatile std::uint32_t g_warp_auxA = 30;
+
+void WriteWarpU16(std::uintptr_t address, std::uint16_t value) {
+    SafeWriteByte(address, static_cast<std::uint8_t>(value & 0xFFu));
+    SafeWriteByte(address + 1, static_cast<std::uint8_t>((value >> 8) & 0xFFu));
+}
+
+}  // namespace
+
+int QueueMapTravel(unsigned dest, unsigned spawn, unsigned aux9, unsigned auxA) {
+    const auto base = ModuleBase();
+    if (base == 0) {
+        return 0;
+    }
+    std::uint8_t mode = 0;
+    if (SafeReadByte(base + kWarpBattleModeRva, &mode) && (mode == 2 || mode == 3)) {
+        LogWarn("Game.WarpTo ignored in battle dest=0x%X spawn=%u", dest, spawn);
+        return 0;
+    }
+    g_warp_dest = dest & 0xFFFFu;
+    g_warp_spawn = spawn & 0xFFFFu;
+    g_warp_aux9 = aux9 & 0xFFu;
+    g_warp_auxA = auxA & 0xFFu;
+    g_warp_pending = 1;
+    LogInfo("Game.WarpTo queued dest=0x%X spawn=%u aux9=%u auxA=%u", dest & 0xFFFFu,
+            spawn & 0xFFFFu, aux9 & 0xFFu, auxA & 0xFFu);
+    return 1;
+}
+
+void TryApplyPendingTravel() {
+#if !defined(_M_IX86)
+    g_warp_pending = 0;
+#else
+    if (!g_warp_pending) {
+        return;
+    }
+    const auto base = ModuleBase();
+    if (base == 0) {
+        return;
+    }
+    std::uint8_t mode = 0;
+    if (SafeReadByte(base + kWarpBattleModeRva, &mode) && (mode == 2 || mode == 3)) {
+        return;
+    }
+    std::uint8_t busy = 1;
+    if (!SafeReadByte(base + kWarpBusyByteRva, &busy) || busy != 0) {
+        return;
+    }
+    if (ModMenuIsOpen() != 0) {
+        ModMenuClose();
+        return;
+    }
+    std::uint32_t menu = 0;
+    if (SafeReadU32(base + kWarpMenuModeRva, &menu) && menu == 3) {
+        std::uint8_t confirm = 0;
+        if (SafeReadByte(base + kWarpWmConfirmRva, &confirm) && confirm != 0) {
+            return;
+        }
+        const auto dest = static_cast<std::uint16_t>(g_warp_dest);
+        const auto spawn = static_cast<std::uint16_t>(g_warp_spawn);
+        g_warp_pending = 0;
+        WriteWarpU16(base + kWarpWmDestRva, dest);
+        WriteWarpU16(base + kWarpWmSpawnRva, spawn);
+        SafeWriteByte(base + kWarpWmConfirmRva, 1);
+        LogInfo("Game.WarpTo world-map confirm dest=0x%X spawn=%u", dest, spawn);
+        return;
+    }
+    if (!g_mod_map_travel_fn) {
+        return;
+    }
+    const auto dest = g_warp_dest;
+    const auto spawn = g_warp_spawn;
+    const auto aux9 = g_warp_aux9;
+    const auto auxA = g_warp_auxA;
+    g_warp_pending = 0;
+    auto* fn = g_mod_map_travel_fn;
+    // Same cdecl as setup +0x7300D: push auxA, push aux9, ecx=dest, edx=spawn.
+    __asm {
+        push auxA
+        push aux9
+        mov ecx, dest
+        mov edx, spawn
+        call fn
+        add esp, 8
+    }
 #endif
 }
 

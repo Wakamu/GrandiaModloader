@@ -13,7 +13,7 @@ internal static class ScriptHydrator
         {
             var scripts = Load(map.Stem, cfg);
             map.AttachBytecode(scripts, map.Stem);
-            log?.Invoke($"hydrated {scripts.Count} script(s) on {map.Stem}");
+
         }
         catch (Exception ex)
         {

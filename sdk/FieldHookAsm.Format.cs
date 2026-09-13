@@ -232,8 +232,8 @@ public static partial class FieldHookAsm
             case 0x10:
                 parts.Add("anim");
                 parts.Add(raw[5].ToString());
-                Omit(parts, "unit", raw[6]);
                 var mode = (flags >> 4) & 3;
+                Omit(parts, mode == 2 ? "talk" : "unit", raw[6]);
                 if (mode != 1)
                 {
                     parts.Add($"mode={mode}");
@@ -474,9 +474,40 @@ public static partial class FieldHookAsm
             }
             case "party_actor":
                 words.Add(NameOrId(PartyActorSubtypes, flags & 0xF));
-                Omit(extra, "char", raw[5]);
-                Omit(extra, "p0", raw[6]);
-                Omit(extra, "p1", raw[7]);
+                if ((flags & 0xF) != 8)
+                {
+                    Omit(extra, "char", raw[5]);
+                }
+
+                if ((flags & 0xF) == 8)
+                {
+                    if ((raw[5] & 1) != 0)
+                    {
+                        if (raw[5] != 1)
+                        {
+                            extra.Add($"char={raw[5]}");
+                        }
+
+                        Omit(extra, "talk", raw[6]);
+                    }
+                    else
+                    {
+                        if (raw[5] != 0)
+                        {
+                            extra.Add($"char={raw[5]}");
+                        }
+
+                        Omit(extra, "party", raw[6]);
+                    }
+
+                    Omit(extra, "facing", raw[7]);
+                }
+                else
+                {
+                    Omit(extra, "p0", raw[6]);
+                    Omit(extra, "p1", raw[7]);
+                }
+
                 Omit(extra, "p2", raw[8]);
                 Omit(extra, "p3", raw[9]);
                 Omit(extra, "p4", raw[0xA]);

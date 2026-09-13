@@ -25,7 +25,6 @@ public static class PatchEmitter
         var patchPath = Path.Combine(dumpDir, $"{map.Stem}.patch");
         if (OverlayMatches(cacheDir, map.Stem, patchPath, patch, exe))
         {
-            log?.Invoke($"emit {map.Stem} unchanged, skip field_tools");
             return true;
         }
 
@@ -37,12 +36,7 @@ public static class PatchEmitter
 
         var args =
             $"patch build {FieldTools.Quote(patchPath)} -o {FieldTools.Quote(cacheDir)} --field {FieldTools.Quote(cfg.Field)} --text {FieldTools.Quote(text)}";
-        log?.Invoke($"emit {map.Stem} via field_tools");
-        var stdout = FieldTools.Run(cfg, args, "field_tools patch");
-        if (!string.IsNullOrWhiteSpace(stdout))
-        {
-            log?.Invoke(stdout.Trim());
-        }
+        FieldTools.Run(cfg, args, "field_tools patch");
 
         return true;
     }

@@ -255,7 +255,12 @@ public sealed class ModStore
         nameWithoutExt.Equals("Grandia.Sdk", StringComparison.OrdinalIgnoreCase) ||
         nameWithoutExt.Equals("Grandia.Runtime", StringComparison.OrdinalIgnoreCase) ||
         nameWithoutExt.Equals("GrandiaMod", StringComparison.OrdinalIgnoreCase) ||
-        nameWithoutExt.Equals("GrandiaModloader", StringComparison.OrdinalIgnoreCase);
+        nameWithoutExt.Equals("GrandiaModloader", StringComparison.OrdinalIgnoreCase) ||
+        nameWithoutExt.Equals("Archipelago.MultiClient.Net", StringComparison.OrdinalIgnoreCase) ||
+        nameWithoutExt.Equals("Newtonsoft.Json", StringComparison.OrdinalIgnoreCase) ||
+        nameWithoutExt.Equals("System.IO.Hashing", StringComparison.OrdinalIgnoreCase) ||
+        nameWithoutExt.Equals("Websocket.Client", StringComparison.OrdinalIgnoreCase) ||
+        nameWithoutExt.StartsWith("System.Reactive", StringComparison.OrdinalIgnoreCase);
 
     public static string? FindBuiltAssembly(string folder)
     {

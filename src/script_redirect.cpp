@@ -130,7 +130,6 @@ bool InstallScriptRedirectHooks() {
         return false;
     }
     g_script_site = script_site;
-    LogInfo("OnScriptExecute hook at +0x6F0B0");
 
     auto* hook_site = reinterpret_cast<std::uint8_t*>(base + kCallHookRva);
     const std::uint8_t hook_expect[] = {0x55, 0x8B, 0xEC, 0x51};
@@ -153,7 +152,7 @@ bool InstallScriptRedirectHooks() {
         return true;
     }
     g_hook_site = hook_site;
-    LogInfo("OnCallHook hook at +0x53560");
+
     return true;
 #endif
 }

@@ -325,9 +325,20 @@ def _layout_pretty(raw: bytes, decoded: dict) -> str | None:
     elif kind == "party_actor":
         sub = flags & 0xF
         words.append(_name_or_id(PARTY_ACTOR_SUBTYPES, sub))
-        _omit_kv(extra, "char", raw[5], default=0)
-        _omit_kv(extra, "p0", raw[6])
-        _omit_kv(extra, "p1", raw[7])
+        if sub == 8:
+            if raw[5] & 1:
+                if raw[5] != 1:
+                    extra.append(f"char={raw[5]}")
+                _omit_kv(extra, "talk", raw[6])
+            else:
+                if raw[5]:
+                    extra.append(f"char={raw[5]}")
+                _omit_kv(extra, "party", raw[6])
+            _omit_kv(extra, "facing", raw[7])
+        else:
+            _omit_kv(extra, "char", raw[5], default=0)
+            _omit_kv(extra, "p0", raw[6])
+            _omit_kv(extra, "p1", raw[7])
         _omit_kv(extra, "p2", raw[8])
         _omit_kv(extra, "p3", raw[9])
         _omit_kv(extra, "p4", raw[0xA])
@@ -471,7 +482,7 @@ def _try_pretty(raw: bytes) -> str | None:
         )
         parts += ["anim", str(anim)]
         if unit:
-            parts.append(f"unit={unit}")
+            parts.append(f"talk={unit}" if mode == 2 else f"unit={unit}")
         if mode != 1:
             parts.append(f"mode={mode}")
         slot = int(decoded.get("slotResult") or 0)
@@ -1008,7 +1019,24 @@ def _parse_layout(hid: int, kind: str, args: list[str], kv: dict[str, str], *, f
         fields[4] = _u8(flags if flags is not None else (0x40 | sub))
         if "char" in kv:
             fields[5] = _u8(parse_int(kv["char"]))
-        for key, off in (("p0", 6), ("p1", 7), ("p2", 8), ("p3", 9), ("p4", 0xA), ("p5", 0xB), ("p6", 0x11)):
+        if sub == 8:
+            if "p0" in kv:
+                fields[6] = _u8(parse_int(kv["p0"]))
+            if "party" in kv:
+                fields[6] = _u8(parse_int(kv["party"]))
+            if "talk" in kv:
+                fields[6] = _u8(parse_int(kv["talk"]))
+            if "p1" in kv:
+                fields[7] = _u8(parse_int(kv["p1"]))
+            if "facing" in kv:
+                fields[7] = _u8(parse_int(kv["facing"]))
+            if "talk" in kv and "char" not in kv:
+                fields[5] = (fields.get(5, 0) | 1) & 0xFF
+        else:
+            for key, off in (("p0", 6), ("p1", 7)):
+                if key in kv:
+                    fields[off] = _u8(parse_int(kv[key]))
+        for key, off in (("p2", 8), ("p3", 9), ("p4", 0xA), ("p5", 0xB), ("p6", 0x11)):
             if key in kv:
                 fields[off] = _u8(parse_int(kv[key]))
     elif kind == "party_state":
@@ -1132,7 +1160,12 @@ def _parse_hook_line(tokens: list[str]) -> bytes:
         return bytes(row)
     if kind == "anim":
         anim = parse_int(args[0]) if args else 0
-        unit = parse_int(kv["unit"]) if "unit" in kv else 0
+        if "talk" in kv:
+            unit = parse_int(kv["talk"])
+        elif "unit" in kv:
+            unit = parse_int(kv["unit"])
+        else:
+            unit = 0
         mode = parse_int(kv["mode"]) if "mode" in kv else 1
         slot = parse_int(kv["slot"]) if "slot" in kv else 0
         return build_anim_latch_row(

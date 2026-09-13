@@ -20,6 +20,9 @@ public sealed class ModHooks
 
     public bool HasAny => _byEvent.Count > 0 && _byEvent.Values.Any(list => list.Count > 0);
 
+    public bool Has<TEvent>() =>
+        _byEvent.TryGetValue(typeof(TEvent), out var list) && list.Count > 0;
+
     public int TargetCount => _targets.Count;
 
     public void Register(object target)
@@ -95,6 +98,7 @@ public sealed class ModHooks
         AddDelegate<LoadEvent>(mod, mod.OnLoad);
         AddDelegate<BattleSetupEvent>(mod, mod.OnBattleSetup);
         AddDelegate<BattleLoadEvent>(mod, mod.OnBattleLoad);
+        AddDelegate<VictoryEvent>(mod, mod.OnVictory);
         AddDelegate<MenuOpenEvent>(mod, mod.OnMenuOpen);
         AddDelegate<EnemyLoadedEvent>(mod, mod.OnEnemyLoaded);
         AddDelegate<ShopOpenEvent>(mod, mod.OnShopOpen);
@@ -104,6 +108,24 @@ public sealed class ModHooks
         AddDelegate<ItemEvent>(mod, mod.OnItem);
         AddDelegate<MagicEvent>(mod, mod.OnMagic);
         AddDelegate<DialogueEvent>(mod, mod.OnDialogue);
+        const BindingFlags hdFlags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+        var hd = mod.GetType().GetMethod(nameof(IMod.OnHdTexture), hdFlags);
+        if (hd != null && hd.DeclaringType != typeof(IMod))
+        {
+            AddDelegate<HdTextureEvent>(mod, mod.OnHdTexture);
+        }
+
+        var match = mod.GetType().GetMethod(nameof(IMod.OnHdSpriteMatch), hdFlags);
+        if (match != null && match.DeclaringType != typeof(IMod))
+        {
+            AddDelegate<HdSpriteMatchEvent>(mod, mod.OnHdSpriteMatch);
+        }
+
+        var draw = mod.GetType().GetMethod(nameof(IMod.OnHdSpriteDraw), hdFlags);
+        if (draw != null && draw.DeclaringType != typeof(IMod))
+        {
+            AddDelegate<HdSpriteDrawEvent>(mod, mod.OnHdSpriteDraw);
+        }
     }
 
     private void AddMethod(object target, MethodInfo method, Type eventType, string attrName)

@@ -1,6 +1,7 @@
 #include "virt_file.h"
 
 #include "clr_host.h"
+#include "hd_texture.h"
 #include "hook_util.h"
 #include "log.h"
 
@@ -8,10 +9,12 @@
 
 #include <cctype>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <string>
 #include <sys/stat.h>
+#include <unordered_map>
 #include <vector>
 
 namespace grandia_mod {
@@ -62,6 +65,7 @@ struct VirtFile {
 
 std::mutex g_mu;
 std::vector<VirtFile> g_files;
+std::unordered_map<std::string, std::vector<std::uint8_t>> g_hd;
 FopenFn g_orig_fopen = nullptr;
 FcloseFn g_orig_fclose = nullptr;
 FreadFn g_orig_fread = nullptr;
@@ -173,10 +177,40 @@ bool IsText1Path(const char* path) {
     return _stricmp(base.c_str(), "TEXT1.BIN") == 0;
 }
 
+std::string HdKey(const char* path) {
+    return ToUpperAscii(Basename(path));
+}
+
+bool IsHdAssetPath(const char* path) {
+    if (!path || !*path) {
+        return false;
+    }
+    const std::string key = HdKey(path);
+    return key.find("__ATLAS") != std::string::npos || key.find("__SPRITEINFO") != std::string::npos;
+}
+
+bool LookupHd(const char* path, const void** data, int* len) {
+    const std::string key = HdKey(path);
+    if (key.empty()) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(g_mu);
+    auto it = g_hd.find(key);
+    if (it == g_hd.end() || it->second.empty() || !data || !len) {
+        return it != g_hd.end() && !it->second.empty();
+    }
+    *data = it->second.data();
+    *len = static_cast<int>(it->second.size());
+    return true;
+}
+
 bool LookupBytes(const char* path, const void** data, int* len) {
     if (IsText1Path(path) && !g_text1.empty() && data && len) {
         *data = g_text1.data();
         *len = static_cast<int>(g_text1.size());
+        return true;
+    }
+    if (LookupHd(path, data, len)) {
         return true;
     }
     std::string stem;
@@ -422,6 +456,7 @@ int __cdecl HookStat(const char* path, struct _stat64i32* buf) {
 }
 
 void* __cdecl HookSdlRwFromFile(const char* path, const char* mode) {
+    PrepareHdAsset(path);
     const void* data = nullptr;
     int len = 0;
     if (g_sdl_rw_mem && LookupBytes(path, &data, &len)) {
@@ -448,12 +483,76 @@ bool VirtFileHasText1() {
     return !g_text1.empty();
 }
 
+void VirtFileSetHd(const char* path, const std::uint8_t* data, std::size_t len) {
+    const std::string key = HdKey(path);
+    if (key.empty()) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(g_mu);
+    if (!data || len == 0) {
+        g_hd.erase(key);
+        return;
+    }
+    g_hd[key].assign(data, data + len);
+}
+
+void PrepareHdAsset(const char* path) {
+    NoteHdAssetPath(path);
+    if (!IsHdAssetPath(path) || !g_orig_fopen || !g_orig_fclose || !g_orig_fseek || !g_orig_ftell ||
+        !g_orig_fread) {
+        return;
+    }
+    if (!ClrHostReady() || RuntimeHasHdTextureHooks() != 1) {
+        return;
+    }
+
+    FILE* file = g_orig_fopen(path, "rb");
+    if (!file) {
+        return;
+    }
+    if (g_orig_fseek(file, 0, SEEK_END) != 0) {
+        g_orig_fclose(file);
+        return;
+    }
+    const long n = g_orig_ftell(file);
+    if (n <= 0 || n > 48 * 1024 * 1024) {
+        g_orig_fclose(file);
+        return;
+    }
+    if (g_orig_fseek(file, 0, SEEK_SET) != 0) {
+        g_orig_fclose(file);
+        return;
+    }
+    std::vector<std::uint8_t> stock(static_cast<std::size_t>(n));
+    const auto got = g_orig_fread(stock.data(), 1, stock.size(), file);
+    g_orig_fclose(file);
+    if (got != stock.size()) {
+        return;
+    }
+
+    HdTextureNative req{};
+    const auto npath = std::strlen(path);
+    const auto copy = npath < sizeof(req.path) ? npath : sizeof(req.path) - 1;
+    std::memcpy(req.path, path, copy);
+    req.src = static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(stock.data()));
+    req.src_len = static_cast<std::int32_t>(stock.size());
+    req.decode = static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(&HdDecodePng));
+    req.encode = static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(&HdEncodePng));
+    req.free_buf = static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(&HdFreeBuf));
+    if (RuntimeOnHdTexture(&req) != 0 || req.dest == 0 || req.dest_len <= 0) {
+        return;
+    }
+    VirtFileSetHd(path, reinterpret_cast<const std::uint8_t*>(static_cast<std::uintptr_t>(req.dest)),
+                  static_cast<std::size_t>(req.dest_len));
+
+}
+
 extern "C" int ModSetText1(const void* data, int len) {
     if (!data || len <= 0) {
         return 0;
     }
     VirtFileSetText1(static_cast<const std::uint8_t*>(data), static_cast<std::size_t>(len));
-    LogInfo("TEXT1 virt %d bytes", len);
+
     return 1;
 }
 
@@ -477,12 +576,24 @@ FILE* VirtFileOpen(const char* path, const char* mode) {
     std::lock_guard<std::mutex> lock(g_mu);
     g_files.push_back(VirtFile{dummy, static_cast<const std::uint8_t*>(data),
                                static_cast<std::size_t>(len), 0, EOF});
-    LogInfo("virt file: %s %d bytes", path, len);
+
     return dummy;
 }
 
 int VirtFileStat(const char* path, void* stat_buf) {
     return HookStat(path, static_cast<struct _stat64i32*>(stat_buf));
+}
+
+bool VirtFileOrigStdio(CrtStdioFns* out) {
+    if (!out) {
+        return false;
+    }
+    out->fopen = g_orig_fopen;
+    out->fclose = g_orig_fclose;
+    out->fread = g_orig_fread;
+    out->fwrite = g_orig_fwrite;
+    out->fseek = g_orig_fseek;
+    return out->fopen && out->fclose && out->fread && out->fwrite && out->fseek;
 }
 
 bool InstallVirtFileHooks() {
@@ -556,7 +667,7 @@ bool InstallVirtFileHooks() {
         LogWarn("virt file: some stdio IAT hooks failed");
         return false;
     }
-    LogInfo("virt file: stdio IAT hooked (embedded maps)");
+
     return true;
 }
 

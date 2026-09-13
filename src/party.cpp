@@ -4,6 +4,7 @@
 #include "clr_host.h"
 #include "hook_util.h"
 #include "log.h"
+#include "menu.h"
 #include "party_pdat.h"
 
 #include <Windows.h>
@@ -32,6 +33,8 @@ constexpr std::uintptr_t kBattleSetupRva = 0x12B070u;
 constexpr std::size_t kBattleSetupPatchSize = 5u;
 constexpr std::uintptr_t kBattleLoadRva = 0x12BDD0u;
 constexpr std::size_t kBattleLoadPatchSize = 6u;
+constexpr std::uintptr_t kVictoryPayoutRva = 0x138790u;
+constexpr std::size_t kVictoryPayoutPatchSize = 6u;
 constexpr std::uintptr_t kBattleAllyCountRva = 0x12C4CDu;
 constexpr std::size_t kBattleAllyCountPatchSize = 5u;
 constexpr std::uintptr_t kBattleAllyCountResumeRva = 0x12C4D6u;
@@ -187,6 +190,15 @@ void* g_battle_setup_trampoline_mem = nullptr;
 void* g_battle_load_site = nullptr;
 std::uint8_t g_battle_load_original[8]{};
 void* g_battle_load_trampoline_mem = nullptr;
+void* g_victory_payout_site = nullptr;
+std::uint8_t g_victory_payout_original[8]{};
+void* g_victory_payout_trampoline_mem = nullptr;
+std::uint16_t g_fight_map = 0;
+std::uint16_t g_fight_dest = 0;
+std::int32_t g_fight_spawn = 0;
+std::int32_t g_fight_table = 0;
+std::int32_t g_fight_row = 0;
+bool g_victory_raised = false;
 void* g_ally_count_site = nullptr;
 std::uint8_t g_ally_count_original[8]{};
 void* g_ally_gate_site = nullptr;
@@ -400,8 +412,7 @@ void CommitFieldPartyRestore() {
         const bool dirty = !ReadFieldParty(cur) || !SameParty(cur, g_saved_field0a);
         WriteFieldParty(g_saved_field0a);
         if (g_staged || dirty) {
-            LogInfo("Party: restored field MapObj+0A to %u,%u,%u,%u", g_saved_field0a[0],
-                    g_saved_field0a[1], g_saved_field0a[2], g_saved_field0a[3]);
+
         }
     }
     ClearAttachParent();
@@ -640,7 +651,7 @@ void StartPartyPoll() {
     InterlockedExchange(&g_party_poll_stop, 0);
     g_party_poll_thread = CreateThread(nullptr, 0, PartyPollThreadProc, nullptr, 0, nullptr);
     if (g_party_poll_thread) {
-        LogInfo("Party field-restore poll started");
+
     } else {
         LogWarn("Party field-restore poll CreateThread failed %lu", GetLastError());
     }
@@ -692,7 +703,7 @@ int SeedMissingCharacterBlocks(std::uint8_t* map_obj, const std::uint8_t* ids, i
             *reinterpret_cast<std::uint16_t*>(blk + 0x18) = 50;
         }
         ++seeded;
-        LogInfo("Party: seeded char block id=%u level=%u", ids[i], blk[3]);
+
     }
     return seeded;
 }
@@ -727,8 +738,6 @@ void PatchFormationTableForBattle() {
         const std::uint8_t id = (slot <= n) ? g_override_ids[slot - 1u] : 0;
         table[static_cast<std::uint32_t>(form) * 4u + slot + 0x10u] = id;
     }
-    LogInfo("Party formation form=%u count=%u ids=%u,%u,%u,%u", form, n, g_override_ids[0],
-            g_override_ids[1], g_override_ids[2], g_override_ids[3]);
 }
 
 unsigned StockAllyCount(unsigned formation_index) {
@@ -900,7 +909,6 @@ void CopyAttachScriptTables(std::uint8_t* ctx, const std::uint8_t* old_species) 
     if (base == 0) {
         return;
     }
-    const bool log = !g_catalog_scripts_logged;
     unsigned n = 0;
     unsigned attach_n = 0;
     __try {
@@ -922,23 +930,16 @@ void CopyAttachScriptTables(std::uint8_t* ctx, const std::uint8_t* old_species) 
             std::uint32_t src_op0 = 0;
             std::memcpy(&src_op0, src, 4);
             std::memcpy(dest, src, kScriptSlotSize);
-            const char* op0_how = "copy";
-            if (attach) {
-                op0_how = "replace";
-            } else if (Opcode0IsSocketInit(src_op0)) {
+            if (!attach && Opcode0IsSocketInit(src_op0)) {
                 // 109FA0/ADFA0 call 140D00 at spawn and AV on a foreign map.
                 // Do not run them, and do not keep the stolen slot's opcode 0
                 // (Centipede F4970 writes +0xB0/+0x14A onto the new mesh).
                 const auto ret_va = static_cast<std::uint32_t>(base + kRetStubRva);
                 std::memcpy(dest, &ret_va, 4);
-                op0_how = "ret";
             }
             ++n;
             if (attach) {
                 ++attach_n;
-            }
-            if (log) {
-                LogInfo("Catalog scripts cat=%u row=%02X src=%p op0=%s", cat, row, src, op0_how);
             }
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -1352,7 +1353,7 @@ std::uint8_t* EnsureFcBank(std::uint8_t fc_row) {
     }
     std::memcpy(arena + kFcPayloadOff, file.data(), file.size());
     g_fc_arenas[fc_row] = arena;
-    LogInfo("Party face: FC%02u bank %p", fc_row, arena);
+
     return arena;
 }
 
@@ -1483,6 +1484,7 @@ void* LeaderModelHeader() {
 extern "C" {
 void* g_mod_battle_setup_tramp = nullptr;
 void* g_mod_battle_load_tramp = nullptr;
+void* g_mod_enemy_payout_tramp = nullptr;
 void* g_mod_ally_count_resume = nullptr;
 void* g_mod_ally_gate_resume = nullptr;
 void* g_mod_ally_spawn = nullptr;
@@ -1559,7 +1561,7 @@ extern "C" void ModOnEmptyEquipReturn(std::uint16_t* slot, std::uint8_t* chr) {
         bag[i] = bag[i + 1];
     }
     bag[grandia_mod::kCharInvSlots - 1] = 0;
-    grandia_mod::LogInfo("Party: empty-slot equip compacted bag index %d", index);
+
 }
 
 extern "C" void ModOnUtf8Null(void* caller) {
@@ -1947,7 +1949,7 @@ extern "C" void ModOnShopOpen(int kind) {
     // the buy-list builder walk the mutated row and crash. OnItem runs at
     // WINDT finalize after the list exists. New stock without a catalog
     // snapshot is not gold 0 (ShopOpenEvent SeedPrice / -1 writeback).
-    grandia_mod::LogInfo("OnShopOpen kind=%d", kind);
+
     void* params = nullptr;
     if (!grandia_mod::SafeReadPointer(grandia_mod::ModuleBase() + grandia_mod::kFieldParamsPtrRva,
                                      &params) ||
@@ -2055,8 +2057,7 @@ extern "C" void ModOnEnemyLoaded(void* actor) {
         }
         return;
     }
-    grandia_mod::LogInfo("EnemyLoaded cat=%d form=%d lv=%d hp=%d/%d", req.catalog, req.form_row,
-                         req.level, req.hp, req.max_hp);
+
     if (grandia_mod::RuntimeOnEnemyLoaded(&req) != 0) {
         return;
     }
@@ -2379,8 +2380,137 @@ void OnBattleSetup() {
     }
 }
 
+void RememberFightIdentity(const BattleLoadNative* req) {
+    g_victory_raised = false;
+    if (!req) {
+        g_fight_map = 0;
+        g_fight_dest = 0;
+        g_fight_spawn = 0;
+        g_fight_table = 0;
+        g_fight_row = 0;
+        return;
+    }
+    g_fight_map = req->map;
+    g_fight_dest = req->dest;
+    g_fight_spawn = req->spawn;
+    g_fight_table = req->encounter[1];
+    g_fight_row = req->encounter[13];
+}
+
+int CountLivingFieldEnemies() {
+    const auto base = ModuleBase();
+    if (base == 0) {
+        return 0;
+    }
+    void* ctxp = nullptr;
+    if (!SafeReadPointer(base + kBattleCtxPtrRva, &ctxp) || !ctxp ||
+        !PtrReadable(ctxp, 0x64a07u + 16u)) {
+        return 0;
+    }
+    auto* ctx = static_cast<std::uint8_t*>(ctxp);
+    auto* table = reinterpret_cast<std::uint8_t*>(base + kCombatantTableRva);
+    if (!PtrReadable(table, kCombatantTableCount * 8u)) {
+        return 0;
+    }
+    int living = 0;
+    __try {
+        for (unsigned id = 0; id < kCombatantTableCount; ++id) {
+            if (table[id * 8u] == 0) {
+                continue;
+            }
+            std::uint32_t raw = 0;
+            std::memcpy(&raw, table + id * 8u + 4u, 4);
+            if (raw < 0x10000u) {
+                continue;
+            }
+            auto* actor = reinterpret_cast<std::uint8_t*>(static_cast<std::uintptr_t>(raw));
+            if (!PtrReadable(actor, 0x190u) || actor[2] != 7) {
+                continue;
+            }
+            std::int16_t hp = 0;
+            std::memcpy(&hp, actor + 0x100, 2);
+            if (hp <= 0) {
+                continue;
+            }
+            bool attach = false;
+            std::uint32_t model_raw = 0;
+            std::memcpy(&model_raw, actor + 0x9C, 4);
+            if (model_raw >= 0x10000u) {
+                auto* model = reinterpret_cast<std::uint8_t*>(static_cast<std::uintptr_t>(model_raw));
+                if (PtrReadable(model, 0x38u)) {
+                    std::uint16_t flags = 0;
+                    std::memcpy(&flags, model + 0x36, 2);
+                    attach = (flags & kAttachModelFlag) == kAttachModelFlag;
+                }
+            }
+            std::uint8_t catalog = actor[0x189];
+            if (catalog == 0) {
+                catalog = actor[0x25];
+            }
+            if (!attach && catalog < 16u) {
+                attach = IsAttachFormRow(ctx[0x64a07u + catalog]);
+            }
+            if (!attach) {
+                ++living;
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+    return living;
+}
+
+void RaiseVictory() {
+    if (g_victory_raised) {
+        return;
+    }
+    const auto base = ModuleBase();
+    void* ctxp = nullptr;
+    if (base == 0 || !SafeReadPointer(base + kBattleCtxPtrRva, &ctxp) || !ctxp ||
+        !PtrReadable(ctxp, 0xEC14u + 32u)) {
+        return;
+    }
+    auto* ctx = static_cast<std::uint8_t*>(ctxp);
+    VictoryNative req{};
+    std::memcpy(&req.exp, ctx + 0x88, 4);
+    std::memcpy(&req.gold, ctx + 0x8C, 4);
+    const int n = ctx[0x23F] > 16 ? 16 : ctx[0x23F];
+    req.drop_count = n;
+    for (int i = 0; i < n; ++i) {
+        std::uint16_t item = 0;
+        std::memcpy(&item, ctx + 0xEC14u + static_cast<unsigned>(i) * 2u, 2);
+        req.drop[i] = item;
+    }
+    req.map = g_fight_map;
+    req.dest = g_fight_dest;
+    req.spawn = g_fight_spawn;
+    req.encounter_table = g_fight_table;
+    req.encounter_row = g_fight_row;
+    if (RuntimeOnVictory(&req) != 0) {
+        return;
+    }
+    g_victory_raised = true;
+
+    std::memcpy(ctx + 0x88, &req.exp, 4);
+    std::memcpy(ctx + 0x8C, &req.gold, 4);
+    int write_n = req.drop_count;
+    if (write_n < 0) {
+        write_n = 0;
+    }
+    if (write_n > 16) {
+        write_n = 16;
+    }
+    ctx[0x23F] = static_cast<std::uint8_t>(write_n);
+    for (int i = 0; i < write_n; ++i) {
+        auto item = static_cast<std::uint16_t>(req.drop[i] < 0 ? 0 : req.drop[i] > 0xFFFF ? 0xFFFF
+                                                                                         : req.drop[i]);
+        std::memcpy(ctx + 0xEC14u + static_cast<unsigned>(i) * 2u, &item, 2);
+    }
+}
+
 void OnBattleLoad() {
     ClearAttachParent();
+    g_victory_raised = false;
     grandia_mod::RaiseMagicCatalog();
     std::uint8_t live[4]{};
     if (!ReadFieldParty(live)) {
@@ -2402,6 +2532,7 @@ void OnBattleLoad() {
         std::memcpy(req.party, true_field, 4);
     }
     FillBattleLoadIdentity(&req);
+    RememberFightIdentity(&req);
     std::uint8_t slots_orig[kBattleEncounterDump - kBattleEncounterHeader]{};
     std::memcpy(slots_orig, req.encounter + kBattleEncounterHeader, sizeof(slots_orig));
     const std::uint8_t count0 = req.encounter[6];
@@ -2482,6 +2613,16 @@ extern "C" void ModOnBattleLoad() {
     grandia_mod::OnBattleLoad();
 }
 
+extern "C" void ModAfterEnemyPayout() {
+    if (grandia_mod::g_victory_raised) {
+        return;
+    }
+    if (grandia_mod::CountLivingFieldEnemies() > 0) {
+        return;
+    }
+    grandia_mod::RaiseVictory();
+}
+
 extern "C" int ModPartyGet(int slot) {
     if (slot < 0 || slot > 3) {
         return -1;
@@ -2514,10 +2655,9 @@ extern "C" int ModPartySetIds(int a, int b, int c, int d) {
     grandia_mod::g_seed_count = n;
     grandia_mod::g_seed_on = n > 0;
     if (n == 0) {
-        grandia_mod::LogInfo("Party.SetIds cleared override");
+
     } else {
-        grandia_mod::LogInfo("Party.SetIds battle seed %u,%u,%u,%u", out[0], out[1], out[2],
-                             out[3]);
+
     }
     return 1;
 }
@@ -2549,6 +2689,17 @@ extern "C" __declspec(naked) void ModBattleLoadDetour() {
         mov esp, dword ptr [esp]
         popad
         jmp dword ptr [g_mod_battle_load_tramp]
+    }
+}
+
+extern "C" __declspec(naked) void ModEnemyPayoutDetour() {
+    __asm {
+        pushad
+        mov ecx, dword ptr [esp + 4]
+        call dword ptr [g_mod_enemy_payout_tramp]
+        call ModAfterEnemyPayout
+        popad
+        ret
     }
 }
 
@@ -2673,6 +2824,16 @@ extern "C" __declspec(naked) void ModUtf8DecDetour() {
 
 extern "C" __declspec(naked) void ModSkillNameInternDetour() {
     __asm {
+        push ecx
+        push ecx
+        call ModMenuLookupOverride
+        add esp, 4
+        test eax, eax
+        jz skill_name
+        add esp, 4
+        ret
+    skill_name:
+        pop ecx
         push ecx
         call dword ptr [g_mod_skill_name_tramp]
         test eax, eax
@@ -2953,7 +3114,20 @@ bool InstallPartyHooks() {
                           &g_battle_load_site, "OnBattleLoad")) {
         return false;
     }
-    LogInfo("OnBattleLoad hook at grandia.exe+0x%X", static_cast<unsigned>(kBattleLoadRva));
+
+    auto* payout_site = reinterpret_cast<std::uint8_t*>(base + kVictoryPayoutRva);
+    if (!IsExecutableAddress(payout_site) || payout_site[0] != 0x55 || payout_site[1] != 0x8B ||
+        payout_site[2] != 0xEC || payout_site[3] != 0x51 || payout_site[4] != 0x53 ||
+        payout_site[5] != 0x56) {
+        LogWarn("OnVictory bytes mismatch at +0x%X", static_cast<unsigned>(kVictoryPayoutRva));
+    } else if (!InstallTrampJump(payout_site, kVictoryPayoutPatchSize,
+                                 reinterpret_cast<void*>(&ModEnemyPayoutDetour),
+                                 &g_victory_payout_trampoline_mem, &g_mod_enemy_payout_tramp,
+                                 g_victory_payout_original, &g_victory_payout_site, "OnVictory")) {
+        LogWarn("OnVictory hook failed");
+    } else {
+
+    }
 
     auto* setup_site = reinterpret_cast<std::uint8_t*>(base + kBattleSetupRva);
     if (!IsExecutableAddress(setup_site) || setup_site[0] != 0x55 || setup_site[1] != 0x8B ||
@@ -2965,7 +3139,7 @@ bool InstallPartyHooks() {
                                  g_battle_setup_original, &g_battle_setup_site, "OnBattleSetup")) {
         LogWarn("OnBattleSetup hook failed");
     } else {
-        LogInfo("OnBattleSetup hook at grandia.exe+0x%X", static_cast<unsigned>(kBattleSetupRva));
+
     }
 
     auto* ally_count_site = reinterpret_cast<std::uint8_t*>(base + kBattleAllyCountRva);
@@ -2989,10 +3163,7 @@ bool InstallPartyHooks() {
             g_ally_gate_site = ally_gate_site;
             g_ally_char_site = ally_char_site;
             g_spawn_hooks_ok = true;
-            LogInfo("Party spawn hooks at +0x%X / +0x%X / +0x%X",
-                    static_cast<unsigned>(kBattleAllyCountRva),
-                    static_cast<unsigned>(kBattleAllySpawnGateRva),
-                    static_cast<unsigned>(kBattleAllyCharIdRva));
+
         } else {
             LogWarn("Party spawn hooks failed");
         }
@@ -3009,7 +3180,7 @@ bool InstallPartyHooks() {
                              reinterpret_cast<void*>(&ModEnemyLoadedDetour),
                              &g_enemy_loaded_trampoline_mem, &g_mod_enemy_loaded_tramp,
                              g_enemy_loaded_original, &g_enemy_loaded_site, "OnEnemyLoaded")) {
-            LogInfo("OnEnemyLoaded hook at +0x%X", static_cast<unsigned>(kEnemyLoadedRva));
+
         }
     } else {
         LogWarn("OnEnemyLoaded site mismatch at +0x%X", static_cast<unsigned>(kEnemyLoadedRva));
@@ -3025,7 +3196,7 @@ bool InstallPartyHooks() {
                              &g_enemy_loaded_alt_trampoline_mem, &g_mod_enemy_loaded_alt_tramp,
                              g_enemy_loaded_alt_original, &g_enemy_loaded_alt_site,
                              "OnEnemyLoaded-alt")) {
-            LogInfo("OnEnemyLoaded alt hook at +0x%X", static_cast<unsigned>(kEnemyLoadedAltRva));
+
         }
     }
 
@@ -3037,7 +3208,7 @@ bool InstallPartyHooks() {
                              reinterpret_cast<void*>(&ModShopOpenDetour),
                              &g_shop_open_trampoline_mem, &g_mod_shop_open_tramp,
                              g_shop_open_original, &g_shop_open_site, "OnShopOpen")) {
-            LogInfo("OnShopOpen hook at +0x%X", static_cast<unsigned>(kShopOpenRva));
+
         }
     } else {
         LogWarn("OnShopOpen site mismatch at +0x%X", static_cast<unsigned>(kShopOpenRva));
@@ -3051,7 +3222,7 @@ bool InstallPartyHooks() {
                              reinterpret_cast<void*>(&ModShopSellOpenDetour),
                              &g_shop_sell_open_trampoline_mem, &g_mod_shop_sell_open_tramp,
                              g_shop_sell_open_original, &g_shop_sell_open_site, "OnShopSell")) {
-            LogInfo("OnShopSell hook at +0x%X", static_cast<unsigned>(kShopSellOpenRva));
+
         }
     } else {
         LogWarn("OnShopSell site mismatch at +0x%X", static_cast<unsigned>(kShopSellOpenRva));
@@ -3065,7 +3236,7 @@ bool InstallPartyHooks() {
         if (WriteJump(sell_list, reinterpret_cast<void*>(&ModShopSellListPriceDetour),
                       g_shop_sell_list_original, kShopSellListPricePatchSize)) {
             g_shop_sell_list_site = sell_list;
-            LogInfo("Sell list price hook at +0x%X", static_cast<unsigned>(kShopSellListPriceRva));
+
         }
     } else {
         LogWarn("Sell list price site mismatch at +0x%X",
@@ -3079,8 +3250,7 @@ bool InstallPartyHooks() {
         if (WriteJump(sell_sel, reinterpret_cast<void*>(&ModShopSellSelectPriceDetour),
                       g_shop_sell_sel_original, kShopSellSelectPricePatchSize)) {
             g_shop_sell_sel_site = sell_sel;
-            LogInfo("Sell select price hook at +0x%X",
-                    static_cast<unsigned>(kShopSellSelectPriceRva));
+
         }
     } else {
         LogWarn("Sell select price site mismatch at +0x%X",
@@ -3095,7 +3265,7 @@ bool InstallPartyHooks() {
                              &g_enemy_model_copy_trampoline_mem, &g_mod_enemy_model_copy_tramp,
                              g_enemy_model_copy_original, &g_enemy_model_copy_site,
                              "enemy-model-copy")) {
-            LogInfo("Attach model-copy hook at +0x%X", static_cast<unsigned>(kEnemyModelCopyRva));
+
         }
     } else {
         LogWarn("Attach model-copy site mismatch at +0x%X",
@@ -3108,7 +3278,7 @@ bool InstallPartyHooks() {
         if (InstallTrampJump(utf8_site, kUtf8DecPatchSize, reinterpret_cast<void*>(&ModUtf8DecDetour),
                              &g_utf8_dec_trampoline_mem, &g_mod_utf8_dec_tramp, g_utf8_dec_original,
                              &g_utf8_dec_site, "utf8-dec")) {
-            LogInfo("UTF-8 decoder null guard at +0x%X", static_cast<unsigned>(kUtf8DecRva));
+
         }
     } else {
         LogWarn("UTF-8 decoder site mismatch at +0x%X", static_cast<unsigned>(kUtf8DecRva));
@@ -3121,7 +3291,7 @@ bool InstallPartyHooks() {
                              reinterpret_cast<void*>(&ModSkillNameInternDetour),
                              &g_skill_name_trampoline_mem, &g_mod_skill_name_tramp,
                              g_skill_name_original, &g_skill_name_site, "skill-name")) {
-            LogInfo("Skill-name intern fallback at +0x%X", static_cast<unsigned>(kSkillNameInternRva));
+
         }
     } else {
         LogWarn("Skill-name intern site mismatch at +0x%X",
@@ -3135,7 +3305,7 @@ bool InstallPartyHooks() {
                              reinterpret_cast<void*>(&ModSkillScriptParseDetour),
                              &g_skill_parse_trampoline_mem, &g_mod_skill_parse_tramp,
                              g_skill_parse_original, &g_skill_parse_site, "skill-parse")) {
-            LogInfo("Skill-script null guard at +0x%X", static_cast<unsigned>(kSkillScriptParseRva));
+
         }
     } else {
         LogWarn("Skill-script parse site mismatch at +0x%X",
@@ -3149,7 +3319,7 @@ bool InstallPartyHooks() {
         if (WriteJump(attach_site, reinterpret_cast<void*>(&ModAttachParentDetour),
                       g_attach_lookup_original, kAttachParentLookupPatchSize)) {
             g_attach_lookup_site = attach_site;
-            LogInfo("Attach parent guard at +0x%X", static_cast<unsigned>(kAttachParentLookupRva));
+
         }
     } else {
         LogWarn("Attach parent site mismatch at +0x%X", static_cast<unsigned>(kAttachParentLookupRva));
@@ -3167,8 +3337,7 @@ bool InstallPartyHooks() {
             WriteJump(char_site, reinterpret_cast<void*>(&ModPartyCharIdDetour), g_char_original, 7)) {
             g_count_site = count_site;
             g_char_site = char_site;
-            LogInfo("Party roster hooks at +0x%X / +0x%X (battle-only override)",
-                    static_cast<unsigned>(kCountLoadRva), static_cast<unsigned>(kCharIdLoadRva));
+
         } else {
             LogWarn("Party roster hooks failed");
         }
@@ -3189,7 +3358,7 @@ bool InstallPartyHooks() {
                              reinterpret_cast<void*>(&ModBattleModelBindDetour),
                              &g_model_bind_trampoline_mem, &g_mod_model_bind_tramp, g_model_bind_original,
                              &g_model_bind_site, "model-bind")) {
-            LogInfo("Party model-bind passthrough at +0x%X", static_cast<unsigned>(kBattleModelBindRva));
+
         }
     }
 
@@ -3200,7 +3369,7 @@ bool InstallPartyHooks() {
                              reinterpret_cast<void*>(&ModBattleAnimBindDetour),
                              &g_anim_bind_trampoline_mem, &g_mod_anim_bind_tramp, g_anim_bind_original,
                              &g_anim_bind_site, "anim-bind")) {
-            LogInfo("Party anim-bind passthrough at +0x%X", static_cast<unsigned>(kBattleAnimBindRva));
+
         }
     }
 
@@ -3211,7 +3380,7 @@ bool InstallPartyHooks() {
         if (WriteJump(face_bank_site, reinterpret_cast<void*>(&ModFaceBankLoadDetour),
                       g_face_bank_original, kFaceBankLoadPatchSize)) {
             g_face_bank_site = face_bank_site;
-            LogInfo("Party face-bank hook at +0x%X", static_cast<unsigned>(kFaceBankLoadRva));
+
         }
     }
 
@@ -3226,7 +3395,7 @@ bool InstallPartyHooks() {
         *skip_slot = reinterpret_cast<void*>(base + skip_rva);
         if (InstallTrampJump(site, kMenuFillPatchSize, detour, tramp_mem, tramp_slot, original, site_out,
                              name)) {
-            LogInfo("Party %s hook at +0x%X", name, static_cast<unsigned>(rva));
+
         }
     };
     install_fill(kMenuFillLoopRva, kMenuFaceFinalizeRva, reinterpret_cast<void*>(&ModMenuFillDetour),
@@ -3247,8 +3416,7 @@ bool InstallPartyHooks() {
         if (WriteJump(empty_equip, reinterpret_cast<void*>(&ModEmptyEquipReturnDetour),
                       g_empty_equip_original, kEmptyEquipReturnPatchSize)) {
             g_empty_equip_site = empty_equip;
-            LogInfo("Empty-slot equip compact at +0x%X",
-                    static_cast<unsigned>(kEmptyEquipReturnRva));
+
         }
     } else {
         LogWarn("Empty-slot equip site mismatch at +0x%X",
@@ -3306,8 +3474,10 @@ void RemovePartyHooks() {
     drop_jump(&g_anim_bind_site, g_anim_bind_original, kBattleAnimBindPatchSize);
     drop_jump(&g_battle_load_site, g_battle_load_original, kBattleLoadPatchSize);
     drop_jump(&g_battle_setup_site, g_battle_setup_original, kBattleSetupPatchSize);
+    drop_jump(&g_victory_payout_site, g_victory_payout_original, kVictoryPayoutPatchSize);
     drop_tramp(&g_battle_load_trampoline_mem, &g_mod_battle_load_tramp);
     drop_tramp(&g_battle_setup_trampoline_mem, &g_mod_battle_setup_tramp);
+    drop_tramp(&g_victory_payout_trampoline_mem, &g_mod_enemy_payout_tramp);
     drop_tramp(&g_init_trampoline_mem, &g_mod_battle_init_tramp);
     drop_tramp(&g_model_bind_trampoline_mem, &g_mod_model_bind_tramp);
     drop_tramp(&g_anim_bind_trampoline_mem, &g_mod_anim_bind_tramp);

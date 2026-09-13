@@ -17,6 +17,8 @@ public static class ModHost
     private static readonly List<Assembly> LoadedAssemblies = [];
     private static bool Loaded;
     private static bool ResolverHooked;
+    private static string? LastSpriteInfoPath;
+    private static readonly Dictionary<uint, string> HdObjectPaths = [];
 
     public static IReadOnlyList<string> SearchDirectories
     {
@@ -168,11 +170,18 @@ public static class ModHost
             void HydrateSec7()
             {
                 var vanilla = TryLoadVanillaMdp(stem, Config, embedded ? packed?.Mdp : null);
-                Sec7Hydrator.Attach(map, vanilla, log);
+                Sec7Hydrator.Attach(map, vanilla, log, Config?.Field);
             }
 
             map.Zones.Ensure = HydrateSec7;
             map.Hooks.Ensure = HydrateSec7;
+            map.Sfx.Ensure = HydrateSec7;
+            map.Npcs.Ensure = HydrateSec7;
+            map.Anims.Ensure = HydrateSec7;
+            map.SpriteClips.Ensure = HydrateSec7;
+            map.Poses.Ensure = HydrateSec7;
+            map.Sprites.Ensure = HydrateSec7;
+            map.Textures.Ensure = HydrateSec7;
             map.EnsureEncounters = HydrateSec7;
 
             var cache = string.IsNullOrWhiteSpace(cacheDir)
@@ -199,7 +208,7 @@ public static class ModHost
                 if (embedded)
                 {
                     MapRamStore.LoadEmbedded(stem, packed!.Mdp, packed.Scn, packed.Ofs);
-                    log?.Invoke($"OnMapOpen {stem} embedded mdp={packed.Mdp?.Length ?? 0} scn={packed.Scn?.Length ?? 0} ofs={packed.Ofs?.Length ?? 0}");
+
                     return 1;
                 }
 
@@ -214,6 +223,36 @@ public static class ModHost
 
             sw.Restart();
             var patch = MapRamStore.Get(stem) ?? new MapRamPatch();
+            byte[] sec29 = [];
+            byte[] sec8 = [];
+            byte[] sec21 = [];
+            if (map.Sfx.Dirty)
+            {
+                sec29 = MdpSec29.Emit(map.Sfx);
+                if (sec29.Length > MapRamStore.Sec29Budget)
+                {
+                    sec29 = sec29.AsSpan(0, MapRamStore.Sec29Budget).ToArray();
+                }
+            }
+
+            if (map.Npcs.Dirty)
+            {
+                sec8 = MdpSec8.Emit(map.Npcs);
+                if (sec8.Length > MapRamStore.Sec8Budget)
+                {
+                    sec8 = sec8.AsSpan(0, MapRamStore.Sec8Budget).ToArray();
+                }
+            }
+
+            if (map.Anims.Dirty)
+            {
+                sec21 = MdpSec21.Emit(map.Anims);
+                if (sec21.Length > MapRamStore.Sec21Budget)
+                {
+                    sec21 = sec21.AsSpan(0, MapRamStore.Sec21Budget).ToArray();
+                }
+            }
+
             if (map.Hooks.Dirty || map.Zones.Dirty)
             {
                 var vanilla = LoadVanillaSec7(stem, Config, embedded ? packed?.Mdp : null);
@@ -223,10 +262,27 @@ public static class ModHost
                     sec7 = sec7.AsSpan(0, MapRamStore.Sec7Budget).ToArray();
                 }
 
-                patch = new MapRamPatch { Sec7 = sec7 };
+                patch = new MapRamPatch { Sec7 = sec7, Sec29 = sec29, Sec8 = sec8, Sec21 = sec21 };
                 foreach (var hook in map.Hooks.Items.Where(h => h.Dirty && !string.IsNullOrWhiteSpace(h.Line)))
                 {
                     patch.SetHook(hook.Id, FieldHookAsm.AssembleHook(hook.Line!, hook.Id));
+                }
+            }
+            else
+            {
+                if (sec29.Length > 0)
+                {
+                    patch.Sec29 = sec29;
+                }
+
+                if (sec8.Length > 0)
+                {
+                    patch.Sec8 = sec8;
+                }
+
+                if (sec21.Length > 0)
+                {
+                    patch.Sec21 = sec21;
                 }
             }
 
@@ -236,8 +292,7 @@ public static class ModHost
             }
 
             MapRamStore.LoadLive(stem, patch);
-            log?.Invoke(
-                $"OnMapOpen {stem} hydrate={hydrateMs}ms emit={sw.ElapsedMilliseconds}ms sec7={patch.Sec7.Length} scripts={patch.Scripts.Count} hooks={patch.Hooks.Count} (in-process)");
+
             return 1;
         }
     }
@@ -290,6 +345,11 @@ public static class ModHost
     public static void OnBattleLoad(BattleLoadEvent ev, Action<string>? log = null)
     {
         InvokeHooks("OnBattleLoad", ev);
+    }
+
+    public static void OnVictory(VictoryEvent ev, Action<string>? log = null)
+    {
+        InvokeHooks("OnVictory", ev);
     }
 
     public static void OnMenuOpen(MenuOpenEvent ev, Action<string>? log = null)
@@ -383,8 +443,6 @@ public static class ModHost
                 log?.Invoke("TEXT1 skip: host SetText1 failed");
                 return;
             }
-
-            log?.Invoke($"TEXT1 title-patch {src.Length} applied={result.Applied} skipped={result.Skipped}");
         }
         catch (Exception ex)
         {
@@ -410,6 +468,106 @@ public static class ModHost
     public static void OnDialogue(DialogueEvent ev, Action<string>? log = null)
     {
         InvokeHooks("OnDialogue", ev);
+    }
+
+    public static void OnHdTexture(HdTextureEvent ev, Action<string>? log = null)
+    {
+        lock (Gate)
+        {
+            if (ev.File == HdAssetFile.SpriteInfo && ev.Kind != HdAssetKind.Unknown &&
+                !string.IsNullOrWhiteSpace(ev.Path))
+            {
+                LastSpriteInfoPath = ev.Path;
+            }
+        }
+
+        InvokeHooks("OnHdTexture", ev);
+    }
+
+    internal static string ResolveHdSpriteMatchPath(string path, uint objectPtr)
+    {
+        lock (Gate)
+        {
+            var resolved = path ?? "";
+            if (!HdTexturePath.TryParse(resolved, out _) && !string.IsNullOrWhiteSpace(LastSpriteInfoPath))
+            {
+                resolved = LastSpriteInfoPath;
+            }
+
+            if (objectPtr != 0 && HdTexturePath.TryParse(resolved, out _))
+            {
+                if (HdObjectPaths.Count >= 512)
+                {
+                    HdObjectPaths.Clear();
+                }
+
+                HdObjectPaths[objectPtr] = resolved;
+            }
+
+            return resolved;
+        }
+    }
+
+    internal static string ResolveHdSpriteDrawPath(string path, uint objectPtr)
+    {
+        lock (Gate)
+        {
+            if (HdTexturePath.TryParse(path, out _))
+            {
+                return path;
+            }
+
+            if (objectPtr != 0 && HdObjectPaths.TryGetValue(objectPtr, out var bound) &&
+                HdTexturePath.TryParse(bound, out _))
+            {
+                return bound;
+            }
+
+            return path ?? "";
+        }
+    }
+
+    public static void OnHdSpriteMatch(HdSpriteMatchEvent ev, Action<string>? log = null)
+    {
+        InvokeHooks("OnHdSpriteMatch", ev);
+    }
+
+    public static void OnHdSpriteDraw(HdSpriteDrawEvent ev, Action<string>? log = null)
+    {
+        InvokeHooks("OnHdSpriteDraw", ev);
+    }
+
+    internal static bool HasHdTextureHooks
+    {
+        get
+        {
+            lock (Gate)
+            {
+                return Loaded && Hooks.Has<HdTextureEvent>();
+            }
+        }
+    }
+
+    internal static bool HasHdSpriteMatchHooks
+    {
+        get
+        {
+            lock (Gate)
+            {
+                return Loaded && Hooks.Has<HdSpriteMatchEvent>();
+            }
+        }
+    }
+
+    internal static bool HasHdSpriteDrawHooks
+    {
+        get
+        {
+            lock (Gate)
+            {
+                return Loaded && Hooks.Has<HdSpriteDrawEvent>();
+            }
+        }
     }
 
     private static void InvokeHooks<TEvent>(string name, TEvent ev)
@@ -483,7 +641,7 @@ public static class ModHost
             Hooks.RegisterIMod(mod);
             found++;
             PluginCount++;
-            log?.Invoke($"loaded IMod {type.FullName}");
+
         }
 
         if (found == 0)
@@ -522,9 +680,7 @@ public static class ModHost
 
         Hooks.Register(instance);
         PluginCount++;
-        log?.Invoke(inits == 0
-            ? $"loaded {type.FullName} (no [Init])"
-            : $"loaded {type.FullName}");
+
     }
 
     private static bool TryCallInit(object instance, MethodInfo method, ModContext ctx,
@@ -586,7 +742,7 @@ public static class ModHost
             var path = EmbeddedResource.Materialize(asm, resource);
             if (path != null)
             {
-                log?.Invoke($"asset {resource} -> {path}");
+
             }
         }
     }
@@ -596,6 +752,30 @@ public static class ModHost
         if (string.Equals(name.Name, "Grandia.Sdk", StringComparison.OrdinalIgnoreCase))
         {
             return typeof(ModAttribute).Assembly;
+        }
+
+        if (string.IsNullOrEmpty(name.Name))
+        {
+            return null;
+        }
+
+        var file = name.Name + ".dll";
+        foreach (var dir in SearchDirs)
+        {
+            var path = Path.Combine(dir, file);
+            if (!File.Exists(path))
+            {
+                continue;
+            }
+
+            try
+            {
+                return ctx.LoadFromAssemblyPath(Path.GetFullPath(path));
+            }
+            catch
+            {
+                // Try the next search directory.
+            }
         }
 
         return null;
@@ -678,6 +858,24 @@ public static class ModHost
             Text1Bytes = data;
             Text1Pin = GCHandle.Alloc(data, GCHandleType.Pinned);
             return Text1Pin.AddrOfPinnedObject();
+        }
+    }
+
+    private static GCHandle HdTexturePin;
+    private static byte[]? HdTextureBytes;
+
+    internal static nint PinHdTexture(byte[] data)
+    {
+        lock (Gate)
+        {
+            if (HdTexturePin.IsAllocated)
+            {
+                HdTexturePin.Free();
+            }
+
+            HdTextureBytes = data;
+            HdTexturePin = GCHandle.Alloc(data, GCHandleType.Pinned);
+            return HdTexturePin.AddrOfPinnedObject();
         }
     }
 

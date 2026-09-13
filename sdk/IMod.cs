@@ -16,7 +16,36 @@ public interface IMod
     /// scripts and hooks are delivered by redirecting <see cref="OnScriptExecute"/>
     /// / <see cref="OnCallHook"/> — the host does not remap fopen. Scripts,
     /// hooks, and zones assemble in-process (no <c>field_tools</c>). Do not
-    /// rewrite dest-cam / sec[32]. <see cref="Map.Encounters"/> lists this
+    /// rewrite dest-cam / sec[32]. <see cref="Map.Sfx"/> is sec[29]
+    /// positional beds (same lazy hydrate as <see cref="Map.Zones"/>);
+    /// mutate / <see cref="Map.AddSfx"/> / <see cref="MapSfx.Remove"/> write
+    /// back onto the heap copy before mixer bind.
+    /// <see cref="Map.Npcs"/> is sec[8] town talkers (kind 0 or 4);
+    /// mutate / <see cref="Map.AddNpc"/> / <see cref="MapNpc.Remove"/>
+    /// recopies the 4 KiB instance heap after the field-setup word-copy.
+    /// Kind-2 wanderers stay on <see cref="Map.Encounters"/> — do not treat
+    /// them as NPCs. Add clones an existing talker's CLUT / flags; it does
+    /// not graft a new hdr+4 body.
+    /// <see cref="Map.Anims"/> is this map's sec[21] clip directory
+    /// (id + raw streams; <see cref="MapAnim.Header"/> /
+    /// <see cref="MapAnim.Frames"/> / <see cref="MapAnim.Cues"/>).
+    /// Play with <c>anim {id} talk={TalkId} mode=2</c>.
+    /// Ids missing there are the shared bank.
+    /// <see cref="MapAnim.SetFrames"/> / <see cref="MapAnim.SetCues"/> /
+    /// <see cref="Map.AddAnim"/> emit and swap <c>[0x71CAE0]</c> after bind.
+    /// <see cref="Map.SpriteClips"/> / <see cref="Map.Poses"/> are this
+    /// map's sec[23] character sprite bank (clip id + timed poses; parts
+    /// carry channel + sprite cookie). Play with
+    /// <c>unit_bind {clipId} {talkId}</c> (field_talk). Read-only — no emit.
+    /// <see cref="Map.Textures"/> is the original PS1 TIM (sec[1]/[27]).
+    /// Crop a pose part with <c>e.Map.Textures.TryCrop(part, out var tim)</c>
+    /// or an HD row with <c>e.Map.TryCrop(e.Map.Sprites.Anim[7], out tim)</c>.
+    /// Dump PNGs with <see cref="MapTextureExtract.Write"/>.
+    /// <see cref="Map.Sprites"/> is the SoftHD spriteinfo catalog plus
+    /// sec[32] UV cells (HD atlas + key). Read-only — no emit.
+    /// <see cref="Game.RunScript(int)"/> / <see cref="Game.RunHook(int, int)"/>
+    /// queue a stock or custom arm for the next idle field tick.
+    /// <see cref="Map.Encounters"/> lists this
     /// map's scripted fights (handler 0x19 / <c>scripted_battle</c>) and
     /// field wanderers (sec[30] + sec[8] kind 2).
     /// </summary>
@@ -115,9 +144,10 @@ public interface IMod
     }
 
     /// <summary>
-    /// After the vanilla 0xE80 slot body is written. Set <see cref="SaveEvent.Trailer"/>
-    /// to persist extra bytes (GMOD envelope after the body). Start value is the last
-    /// loaded trailer so later mods see earlier writes.
+    /// After the vanilla 0xE80 slot body is written. Prefer
+    /// <see cref="Game.SaveData"/> (shared key → object bag; the host
+    /// always writes it, even with no mods). <see cref="SaveEvent.Trailer"/>
+    /// is the JSON snapshot at hook start.
     /// </summary>
     void OnSave(SaveEvent e)
     {
@@ -126,7 +156,8 @@ public interface IMod
     /// <summary>
     /// Slot load. <see cref="LoadPhase.ConfirmPeek"/> is confirm-Yes (set
     /// <see cref="LoadEvent.Allow"/> to veto before Loading). <see cref="LoadPhase.Applied"/>
-    /// is after the vanilla body is in RAM — restore from <see cref="LoadEvent.Trailer"/> here.
+    /// is after the vanilla body is in RAM — <see cref="Game.SaveData"/> is
+    /// already replaced from this slot (<see cref="LoadEvent.Data"/>).
     /// Save-list preview does not raise this.
     /// </summary>
     void OnLoad(LoadEvent e)
@@ -156,6 +187,17 @@ public interface IMod
     /// Do not write field MapObj+0x0A yourself; do not call +0x54F10.
     /// </summary>
     void OnBattleLoad(BattleLoadEvent e)
+    {
+    }
+
+    /// <summary>
+    /// Last field enemy just paid out at +0x138790. Once per fight.
+    /// <see cref="VictoryEvent.Exp"/> / <see cref="VictoryEvent.Gold"/> /
+    /// <see cref="VictoryEvent.Drops"/> write the result pots before the
+    /// victory screen. <see cref="VictoryEvent.EncounterRow"/> is the field
+    /// wanderer group. Does not fire on flee.
+    /// </summary>
+    void OnVictory(VictoryEvent e)
     {
     }
 
@@ -194,8 +236,8 @@ public interface IMod
 
     /// <summary>
     /// About 60 Hz. Poll <see cref="TickEvent.Pad"/> / <see cref="Game.Input"/>
-    /// and drive <see cref="Game.Turbo"/>, <see cref="Game.Encounters"/>, and
-    /// <see cref="Game.Debug"/>. Set <see cref="TickEvent.BlockGameInput"/> to
+    /// and drive <see cref="Game.Turbo"/>, <see cref="Game.Encounters"/>,
+    /// <see cref="Game.Debug"/>, <see cref="Game.Menu"/>, and <see cref="Game.Ui"/>. Set <see cref="TickEvent.BlockGameInput"/> to
     /// swallow this pad update so the game does not walk, open pause,
     /// or move the title New Game / Continue / Options cursor.
     /// </summary>
@@ -229,8 +271,12 @@ public interface IMod
     /// <c>TEXT1.BIN</c> in place at the title screen (same file size; a
     /// string that does not fit is skipped). Unused vanilla slots included.
     /// <see cref="ItemEvent.Effect"/> is the skill id used in combat
-    /// (Herbs → Heal). Re-apply on every open — the game recopies vanilla
-    /// WINDT each time. SellPrice defaults to Cost/2 (vanilla shop rule).
+    /// (Herbs → Heal). <see cref="ItemEvent.WeaponKind"/> is record+8.
+    /// <see cref="ItemEvent.Stats"/> / <see cref="ItemEvent.Auto"/> /
+    /// <see cref="ItemEvent.AttackRange"/> are the typed para and on-hit
+    /// bytes (raw <c>Para*</c> / <c>Unknown8</c> still work). Re-apply on
+    /// every open — the game recopies vanilla WINDT each time. SellPrice
+    /// defaults to Cost/2 (vanilla shop rule).
     /// </summary>
     void OnItem(ItemEvent e)
     {
@@ -258,6 +304,45 @@ public interface IMod
     /// the script. In-process — no <c>field_tools</c>.
     /// </summary>
     void OnDialogue(DialogueEvent e)
+    {
+    }
+
+    /// <summary>
+    /// SoftHD is about to open <c>*__atlas.png</c>,
+    /// <c>*__atlas_tables.png</c>, or <c>*__spriteinfo.bin</c>
+    /// (fopen / SDL). <see cref="HdTextureEvent.Kind"/>
+    /// is the filename token (maps / tenants / anim / mapeff / faces /
+    /// party / areamap / logo / title / …). <see cref="HdTextureEvent.Pixels"/> decodes the
+    /// PNG only if read. <see cref="HdTextureEvent.Replace"/> /
+    /// <see cref="HdTextureEvent.ReplacePixels"/> virt-file the replacement
+    /// so SoftHD decodes it. Not MDP Huffman tpages.
+    /// </summary>
+    void OnHdTexture(HdTextureEvent e)
+    {
+    }
+
+    /// <summary>
+    /// SoftHD inserted one SPRIV row into its live table
+    /// (parse of <c>*__spriteinfo.bin</c>). <see cref="HdSpriteMatchEvent.Index"/>
+    /// is the row; <see cref="HdSpriteMatchEvent.Rect"/> is atlas xywh when
+    /// packed that way. <see cref="HdSpriteMatchEvent.Record"/> is the raw
+    /// 8- or 32-byte insert (tenants / maps v4 keep the PS1 match key here).
+    /// Observe-only. Not <c>Map.Poses[].SpriteIndex</c>.
+    /// </summary>
+    void OnHdSpriteMatch(HdSpriteMatchEvent e)
+    {
+    }
+
+    /// <summary>
+    /// SoftHD resolved a live blit to an HD atlas crop
+    /// (<c>+0x1B67A</c>). <see cref="HdSpriteDrawEvent.Index"/> is that
+    /// row; <see cref="HdSpriteDrawEvent.Rect"/> is the atlas crop;
+    /// <see cref="HdSpriteDrawEvent.Live"/> is the UV box; the catalog
+    /// key is FNV of the PS1 VRAM texels. 32-byte
+    /// tables only. Observe-only; per blit — do not subscribe unless
+    /// you need it.
+    /// </summary>
+    void OnHdSpriteDraw(HdSpriteDrawEvent e)
     {
     }
 }

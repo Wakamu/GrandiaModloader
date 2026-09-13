@@ -16,6 +16,7 @@
     <FieldToolsExe Condition="'$(FieldToolsExe)' == '' and Exists('$(GrandiaFieldPatch)\vendor\field_tools\field_tools.exe')">$(GrandiaFieldPatch)\vendor\field_tools\field_tools.exe</FieldToolsExe>
     <AssembleModScripts Condition="'$(AssembleModScripts)' == ''">true</AssembleModScripts>
     <CopyModToLoader Condition="'$(CopyModToLoader)' == ''">true</CopyModToLoader>
+    <CopyModDependencies Condition="'$(CopyModDependencies)' == ''">true</CopyModDependencies>
     <GrandiaModsDir Condition="'$(GrandiaModsDir)' == ''">$(APPDATA)\GrandiaModloader\mods</GrandiaModsDir>
   </PropertyGroup>
 
@@ -52,9 +53,14 @@
 
   <Target Name="CopyModToLoader" AfterTargets="Build"
           Condition="'$(CopyModToLoader)' == 'true' and '$(TargetPath)' != ''">
+    <ItemGroup>
+      <_ModCopyLocal Include="@(ReferenceCopyLocalPaths)" Condition="'%(Filename)' != 'Grandia.Sdk'" />
+    </ItemGroup>
     <MakeDir Directories="$(GrandiaModsDir)" />
     <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(GrandiaModsDir)" SkipUnchangedFiles="true" />
     <Copy SourceFiles="$(TargetDir)$(TargetName).pdb" DestinationFolder="$(GrandiaModsDir)" SkipUnchangedFiles="true"
           Condition="Exists('$(TargetDir)$(TargetName).pdb')" />
+    <Copy SourceFiles="@(_ModCopyLocal)" DestinationFolder="$(GrandiaModsDir)" SkipUnchangedFiles="true"
+          Condition="'$(CopyModDependencies)' == 'true' and '@(_ModCopyLocal)' != ''" />
   </Target>
 </Project>

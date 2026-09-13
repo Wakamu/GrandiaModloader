@@ -73,6 +73,7 @@ using OnSaveFn = int(__cdecl*)(SaveEventNative* req);
 using OnLoadFn = int(__cdecl*)(LoadEventNative* req);
 using OnBattleLoadFn = int(__cdecl*)(BattleLoadNative* req);
 using OnBattleSetupFn = int(__cdecl*)(BattleLoadNative* req);
+using OnVictoryFn = int(__cdecl*)(VictoryNative* req);
 using OnMenuOpenFn = int(__cdecl*)(MenuOpenNative* req);
 using OnEnemyLoadedFn = int(__cdecl*)(EnemyLoadedNative* req);
 using OnShopOpenFn = int(__cdecl*)(ShopOpenNative* req);
@@ -82,6 +83,12 @@ using OnCharacterFn = int(__cdecl*)(CharacterNative* req);
 using OnItemFn = int(__cdecl*)(ItemNative* req);
 using OnMagicFn = int(__cdecl*)(MagicNative* req);
 using OnDialogueFn = int(__cdecl*)(DialogueNative* req);
+using OnHdTextureFn = int(__cdecl*)(HdTextureNative* req);
+using HasHdTextureHooksFn = int(__cdecl*)();
+using OnHdSpriteMatchFn = int(__cdecl*)(HdSpriteMatchNative* req);
+using HasHdSpriteMatchHooksFn = int(__cdecl*)();
+using OnHdSpriteDrawFn = int(__cdecl*)(HdSpriteDrawNative* req);
+using HasHdSpriteDrawHooksFn = int(__cdecl*)();
 using BindHostFn = int(__cdecl*)(HostApiNative* api);
 using GetMapFileFn = int(__cdecl*)(MapFileNative* req);
 using PatchText1Fn = int(__cdecl*)(Text1Native* req);
@@ -104,6 +111,7 @@ OnSaveFn g_on_save = nullptr;
 OnLoadFn g_on_load = nullptr;
 OnBattleLoadFn g_on_battle_load = nullptr;
 OnBattleSetupFn g_on_battle_setup = nullptr;
+OnVictoryFn g_on_victory = nullptr;
 OnMenuOpenFn g_on_menu_open = nullptr;
 OnEnemyLoadedFn g_on_enemy_loaded = nullptr;
 OnShopOpenFn g_on_shop_open = nullptr;
@@ -113,6 +121,12 @@ OnCharacterFn g_on_character = nullptr;
 OnItemFn g_on_item = nullptr;
 OnMagicFn g_on_magic = nullptr;
 OnDialogueFn g_on_dialogue = nullptr;
+OnHdTextureFn g_on_hd_texture = nullptr;
+HasHdTextureHooksFn g_has_hd_texture = nullptr;
+OnHdSpriteMatchFn g_on_hd_sprite_match = nullptr;
+HasHdSpriteMatchHooksFn g_has_hd_sprite_match = nullptr;
+OnHdSpriteDrawFn g_on_hd_sprite_draw = nullptr;
+HasHdSpriteDrawHooksFn g_has_hd_sprite_draw = nullptr;
 BindHostFn g_bind_host = nullptr;
 GetMapFileFn g_get_map_file = nullptr;
 PatchText1Fn g_patch_text1 = nullptr;
@@ -329,24 +343,21 @@ __declspec(noinline) bool LoadRuntime() {
         return true;
     }
 
-    LogInfo("CLR: locating x86 .NET");
     const std::wstring dotnet_root = FindX86DotnetRoot();
     if (dotnet_root.empty()) {
         LogWarn("CLR: no x86 dotnet root (install .NET 8 x86 runtime)");
         return false;
     }
     PinX86Dotnet(dotnet_root);
-    LogInfo("CLR: DOTNET_ROOT=%s", Narrow(dotnet_root).c_str());
 
     const std::string dll_dir = ModuleDirectory();
     std::wstring hostfxr_path;
-    LogInfo("CLR: LoadLibrary hostfxr");
+
     g_hostfxr = TryLoadHostFxr(&hostfxr_path);
     if (!g_hostfxr) {
         LogWarn("hostfxr.dll not found (need x86 .NET 8/9 hostfxr)");
         return false;
     }
-    LogInfo("CLR: hostfxr=%s", Narrow(hostfxr_path).c_str());
 
     auto init_cfg = reinterpret_cast<hostfxr_initialize_for_runtime_config_fn>(
         GetProcAddress(g_hostfxr, "hostfxr_initialize_for_runtime_config"));
@@ -370,20 +381,17 @@ __declspec(noinline) bool LoadRuntime() {
         LogWarn("Grandia.Runtime.dll / .runtimeconfig.json missing next to GrandiaMod.dll");
         return false;
     }
-    LogInfo("CLR: runtimeconfig=%s", Narrow(runtime_config).c_str());
 
     hostfxr_initialize_parameters params{};
     params.size = sizeof(params);
     params.host_path = host_path.c_str();
     params.dotnet_root = dotnet_root.c_str();
 
-    LogInfo("CLR: hostfxr_initialize_for_runtime_config");
     const int rc = init_cfg(runtime_config.c_str(), &params, &g_ctx);
     if (!HostfxrOk(rc) || !g_ctx) {
         LogWarn("hostfxr_initialize_for_runtime_config failed (%d)", rc);
         return false;
     }
-    LogInfo("CLR: host context ready (rc=%d)", rc);
 
     void* load_fn = nullptr;
     const int drc =
@@ -396,7 +404,6 @@ __declspec(noinline) bool LoadRuntime() {
     auto load = reinterpret_cast<load_assembly_and_get_function_pointer_fn>(load_fn);
     const char_t* unmanaged_only = reinterpret_cast<const char_t*>(-1);
 
-    LogInfo("CLR: load Grandia.Runtime entry points");
     void* init_ptr = nullptr;
     void* open_ptr = nullptr;
     void* patch_ptr = nullptr;
@@ -408,6 +415,7 @@ __declspec(noinline) bool LoadRuntime() {
     void* load_ptr = nullptr;
     void* battle_ptr = nullptr;
     void* setup_ptr = nullptr;
+    void* victory_ptr = nullptr;
     void* menu_ptr = nullptr;
     void* enemy_ptr = nullptr;
     void* shop_ptr = nullptr;
@@ -421,6 +429,12 @@ __declspec(noinline) bool LoadRuntime() {
     void* item_ptr = nullptr;
     void* magic_ptr = nullptr;
     void* dialogue_ptr = nullptr;
+    void* hd_ptr = nullptr;
+    void* has_hd_ptr = nullptr;
+    void* hd_match_ptr = nullptr;
+    void* has_hd_match_ptr = nullptr;
+    void* hd_draw_ptr = nullptr;
+    void* has_hd_draw_ptr = nullptr;
     void* bind_ptr = nullptr;
     void* map_file_ptr = nullptr;
     const int irc = load(assembly.c_str(), L"Grandia.Runtime.NativeEntry, Grandia.Runtime",
@@ -445,6 +459,8 @@ __declspec(noinline) bool LoadRuntime() {
                                 L"OnBattleLoad", unmanaged_only, nullptr, &battle_ptr);
     const int brc_setup = load(assembly.c_str(), L"Grandia.Runtime.NativeEntry, Grandia.Runtime",
                                L"OnBattleSetup", unmanaged_only, nullptr, &setup_ptr);
+    const int vrc = load(assembly.c_str(), L"Grandia.Runtime.NativeEntry, Grandia.Runtime",
+                         L"OnVictory", unmanaged_only, nullptr, &victory_ptr);
     const int mrc = load(assembly.c_str(), L"Grandia.Runtime.NativeEntry, Grandia.Runtime",
                          L"OnMenuOpen", unmanaged_only, nullptr, &menu_ptr);
     const int erc = load(assembly.c_str(), L"Grandia.Runtime.NativeEntry, Grandia.Runtime",
@@ -471,6 +487,18 @@ __declspec(noinline) bool LoadRuntime() {
                           L"OnMagic", unmanaged_only, nullptr, &magic_ptr);
     const int dlrc = load(assembly.c_str(), L"Grandia.Runtime.NativeEntry, Grandia.Runtime",
                           L"OnDialogue", unmanaged_only, nullptr, &dialogue_ptr);
+    const int hdrc = load(assembly.c_str(), L"Grandia.Runtime.NativeEntry, Grandia.Runtime",
+                          L"OnHdTexture", unmanaged_only, nullptr, &hd_ptr);
+    (void)load(assembly.c_str(), L"Grandia.Runtime.NativeEntry, Grandia.Runtime",
+               L"HasHdTextureHooks", unmanaged_only, nullptr, &has_hd_ptr);
+    (void)load(assembly.c_str(), L"Grandia.Runtime.NativeEntry, Grandia.Runtime",
+               L"OnHdSpriteMatch", unmanaged_only, nullptr, &hd_match_ptr);
+    (void)load(assembly.c_str(), L"Grandia.Runtime.NativeEntry, Grandia.Runtime",
+               L"HasHdSpriteMatchHooks", unmanaged_only, nullptr, &has_hd_match_ptr);
+    (void)load(assembly.c_str(), L"Grandia.Runtime.NativeEntry, Grandia.Runtime",
+               L"OnHdSpriteDraw", unmanaged_only, nullptr, &hd_draw_ptr);
+    (void)load(assembly.c_str(), L"Grandia.Runtime.NativeEntry, Grandia.Runtime",
+               L"HasHdSpriteDrawHooks", unmanaged_only, nullptr, &has_hd_draw_ptr);
     const int brc = load(assembly.c_str(), L"Grandia.Runtime.NativeEntry, Grandia.Runtime",
                          L"BindHost", unmanaged_only, nullptr, &bind_ptr);
     const int mfrc = load(assembly.c_str(), L"Grandia.Runtime.NativeEntry, Grandia.Runtime",
@@ -479,15 +507,15 @@ __declspec(noinline) bool LoadRuntime() {
     const int t1rc = load(assembly.c_str(), L"Grandia.Runtime.NativeEntry, Grandia.Runtime",
                           L"PatchText1", unmanaged_only, nullptr, &text1_ptr);
     if (irc != 0 || orc != 0 || prc != 0 || frc != 0 || arc != 0 || grc != 0 || wrc != 0 || src != 0 ||
-        lrc != 0 || brc_battle != 0 || brc_setup != 0 || mrc != 0 || erc != 0 || shrc != 0 ||
+        lrc != 0 || brc_battle != 0 || brc_setup != 0 || vrc != 0 || mrc != 0 || erc != 0 || shrc != 0 ||
         wlrc != 0 || scrc != 0 || hkrc != 0 || tvrc != 0 || tkrc != 0 || tsrc != 0 || chrc != 0 ||
-        itrc != 0 || mgrc != 0 || dlrc != 0 || brc != 0 ||
+        itrc != 0 || mgrc != 0 || dlrc != 0 || hdrc != 0 || brc != 0 ||
         mfrc != 0 || t1rc != 0 ||
         !init_ptr ||
         !open_ptr || !patch_ptr || !flag_ptr || !assign_ptr || !gold_ptr || !wm_ptr || !save_ptr ||
-        !load_ptr || !battle_ptr || !setup_ptr || !menu_ptr || !enemy_ptr || !shop_ptr ||
+        !load_ptr || !battle_ptr || !setup_ptr || !victory_ptr || !menu_ptr || !enemy_ptr || !shop_ptr ||
         !wm_load_ptr || !script_ptr || !hook_ptr || !travel_ptr || !tick_ptr || !title_ptr ||
-        !character_ptr || !item_ptr || !magic_ptr || !dialogue_ptr ||
+        !character_ptr || !item_ptr || !magic_ptr || !dialogue_ptr || !hd_ptr ||
         !bind_ptr ||
         !map_file_ptr || !text1_ptr) {
         LogWarn(
@@ -508,6 +536,7 @@ __declspec(noinline) bool LoadRuntime() {
     g_on_load = reinterpret_cast<OnLoadFn>(load_ptr);
     g_on_battle_load = reinterpret_cast<OnBattleLoadFn>(battle_ptr);
     g_on_battle_setup = reinterpret_cast<OnBattleSetupFn>(setup_ptr);
+    g_on_victory = reinterpret_cast<OnVictoryFn>(victory_ptr);
     g_on_menu_open = reinterpret_cast<OnMenuOpenFn>(menu_ptr);
     g_on_enemy_loaded = reinterpret_cast<OnEnemyLoadedFn>(enemy_ptr);
     g_on_shop_open = reinterpret_cast<OnShopOpenFn>(shop_ptr);
@@ -521,12 +550,18 @@ __declspec(noinline) bool LoadRuntime() {
     g_on_item = reinterpret_cast<OnItemFn>(item_ptr);
     g_on_magic = reinterpret_cast<OnMagicFn>(magic_ptr);
     g_on_dialogue = reinterpret_cast<OnDialogueFn>(dialogue_ptr);
+    g_on_hd_texture = reinterpret_cast<OnHdTextureFn>(hd_ptr);
+    g_has_hd_texture = reinterpret_cast<HasHdTextureHooksFn>(has_hd_ptr);
+    g_on_hd_sprite_match = reinterpret_cast<OnHdSpriteMatchFn>(hd_match_ptr);
+    g_has_hd_sprite_match = reinterpret_cast<HasHdSpriteMatchHooksFn>(has_hd_match_ptr);
+    g_on_hd_sprite_draw = reinterpret_cast<OnHdSpriteDrawFn>(hd_draw_ptr);
+    g_has_hd_sprite_draw = reinterpret_cast<HasHdSpriteDrawHooksFn>(has_hd_draw_ptr);
     g_bind_host = reinterpret_cast<BindHostFn>(bind_ptr);
     g_get_map_file = reinterpret_cast<GetMapFileFn>(map_file_ptr);
     g_patch_text1 = reinterpret_cast<PatchText1Fn>(text1_ptr);
 
     const std::string mods_json = dll_dir + "\\mods.json";
-    LogInfo("CLR: Init(%s)", mods_json.c_str());
+
     if (g_init(mods_json.c_str()) != 0) {
         LogWarn("Grandia.Runtime Init failed (mods.json next to the DLL)");
         g_init = nullptr;
@@ -542,6 +577,7 @@ __declspec(noinline) bool LoadRuntime() {
         g_on_load = nullptr;
         g_on_battle_load = nullptr;
         g_on_battle_setup = nullptr;
+        g_on_victory = nullptr;
         g_on_menu_open = nullptr;
         g_on_enemy_loaded = nullptr;
         g_on_shop_open = nullptr;
@@ -553,6 +589,12 @@ __declspec(noinline) bool LoadRuntime() {
         g_on_item = nullptr;
         g_on_magic = nullptr;
         g_on_dialogue = nullptr;
+        g_on_hd_texture = nullptr;
+        g_has_hd_texture = nullptr;
+        g_on_hd_sprite_match = nullptr;
+        g_has_hd_sprite_match = nullptr;
+        g_on_hd_sprite_draw = nullptr;
+        g_has_hd_sprite_draw = nullptr;
         g_bind_host = nullptr;
         g_get_map_file = nullptr;
         return false;
@@ -573,7 +615,7 @@ __declspec(noinline) bool LoadRuntime() {
 }  // namespace
 
 bool InstallClrHost() {
-    LogInfo("CLR: InstallClrHost");
+
     __try {
         return LoadRuntime();
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -598,6 +640,7 @@ void RemoveClrHost() {
     g_on_load = nullptr;
     g_on_battle_load = nullptr;
     g_on_battle_setup = nullptr;
+    g_on_victory = nullptr;
     g_on_menu_open = nullptr;
     g_on_enemy_loaded = nullptr;
     g_on_shop_open = nullptr;
@@ -609,6 +652,12 @@ void RemoveClrHost() {
     g_on_item = nullptr;
     g_on_magic = nullptr;
     g_on_dialogue = nullptr;
+    g_on_hd_texture = nullptr;
+    g_has_hd_texture = nullptr;
+    g_on_hd_sprite_match = nullptr;
+    g_has_hd_sprite_match = nullptr;
+    g_on_hd_sprite_draw = nullptr;
+    g_has_hd_sprite_draw = nullptr;
     g_bind_host = nullptr;
     g_get_map_file = nullptr;
     g_ctx = nullptr;
@@ -786,6 +835,13 @@ int RuntimeOnBattleSetup(BattleLoadNative* req) {
     return g_on_battle_setup(req);
 }
 
+int RuntimeOnVictory(VictoryNative* req) {
+    if (!g_ready || !g_on_victory || !req) {
+        return -1;
+    }
+    return g_on_victory(req);
+}
+
 int RuntimeOnMenuOpen(MenuOpenNative* req) {
     if (!g_ready || !g_on_menu_open || !req) {
         return -1;
@@ -854,6 +910,48 @@ int RuntimeOnDialogue(DialogueNative* req) {
         return -1;
     }
     return g_on_dialogue(req);
+}
+
+int RuntimeOnHdTexture(HdTextureNative* req) {
+    if (!g_ready || !g_on_hd_texture || !req) {
+        return -1;
+    }
+    return g_on_hd_texture(req);
+}
+
+int RuntimeHasHdTextureHooks() {
+    if (!g_ready || !g_has_hd_texture) {
+        return 0;
+    }
+    return g_has_hd_texture();
+}
+
+int RuntimeOnHdSpriteMatch(HdSpriteMatchNative* req) {
+    if (!g_ready || !g_on_hd_sprite_match || !req) {
+        return -1;
+    }
+    return g_on_hd_sprite_match(req);
+}
+
+int RuntimeHasHdSpriteMatchHooks() {
+    if (!g_ready || !g_has_hd_sprite_match) {
+        return 0;
+    }
+    return g_has_hd_sprite_match();
+}
+
+int RuntimeOnHdSpriteDraw(HdSpriteDrawNative* req) {
+    if (!g_ready || !g_on_hd_sprite_draw || !req) {
+        return -1;
+    }
+    return g_on_hd_sprite_draw(req);
+}
+
+int RuntimeHasHdSpriteDrawHooks() {
+    if (!g_ready || !g_has_hd_sprite_draw) {
+        return 0;
+    }
+    return g_has_hd_sprite_draw();
 }
 
 }  // namespace grandia_mod

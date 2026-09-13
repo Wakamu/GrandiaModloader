@@ -50,6 +50,12 @@ public unsafe struct MapPatchInfoNative
     public int StockScnLen;
     public int StockOfsLen;
     public int Dirty;
+    public uint Sec29;
+    public int Sec29Len;
+    public uint Sec8;
+    public int Sec8Len;
+    public uint Sec21;
+    public int Sec21Len;
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
@@ -136,7 +142,7 @@ public unsafe struct SaveEventNative
 {
     public int Slot;
     public int TrailerLen;
-    public fixed byte Trailer[1024];
+    public fixed byte Trailer[GameSaveData.MaxBytes];
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
@@ -146,7 +152,7 @@ public unsafe struct LoadEventNative
     public int Phase;
     public int Allow;
     public int TrailerLen;
-    public fixed byte Trailer[1024];
+    public fixed byte Trailer[GameSaveData.MaxBytes];
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
@@ -173,6 +179,20 @@ public unsafe struct MenuOpenNative
 {
     public int Which;
     public fixed byte Party[4];
+}
+
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
+public unsafe struct VictoryNative
+{
+    public int Exp;
+    public int Gold;
+    public int DropCount;
+    public fixed int Drop[16];
+    public ushort Map;
+    public ushort Dest;
+    public int Spawn;
+    public int EncounterTable;
+    public int EncounterRow;
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
@@ -336,6 +356,52 @@ public unsafe struct MapFileNative
     public int Len;
 }
 
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal unsafe delegate int HdDecodePngFn(byte* src, int srcLen, int* w, int* h, byte** rgba, int* rgbaLen);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal unsafe delegate int HdEncodePngFn(byte* rgba, int w, int h, byte** png, int* pngLen);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal unsafe delegate void HdFreeBufFn(void* p);
+
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
+public unsafe struct HdTextureNative
+{
+    public fixed byte Path[260];
+    public uint Src;
+    public int SrcLen;
+    public uint Dest;
+    public int DestLen;
+    public uint Decode;
+    public uint Encode;
+    public uint FreeBuf;
+}
+
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
+public unsafe struct HdSpriteMatchNative
+{
+    public fixed byte Path[260];
+    public int Index;
+    public int RecLen;
+    public fixed byte Record[32];
+    public uint Object;
+}
+
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
+public unsafe struct HdSpriteDrawNative
+{
+    public fixed byte Path[260];
+    public int Index;
+    public int RecLen;
+    public fixed byte Record[32];
+    public ushort LiveX;
+    public ushort LiveY;
+    public ushort LiveW;
+    public ushort LiveH;
+    public uint Object;
+}
+
 public static unsafe class NativeEntry
 {
     [UnmanagedCallersOnly(EntryPoint = "GrandiaRuntimePatchText1", CallConvs = [typeof(CallConvCdecl)])]
@@ -378,7 +444,6 @@ public static unsafe class NativeEntry
                 return -1;
             }
 
-            NativeLog($"PatchText1: in-place {src.Length} applied={result.Applied} skipped={result.Skipped}");
             var pin = ModHost.PinText1(result.Data);
             req->Dest = (uint)pin;
             req->DestLen = result.Data.Length;
@@ -494,6 +559,12 @@ public static unsafe class NativeEntry
             req->StockScnLen = patch.StockScnLen;
             req->StockOfsLen = patch.StockOfsLen;
             req->Dirty = 1;
+            req->Sec29 = (uint)patch.Sec29Ptr;
+            req->Sec29Len = patch.Sec29.Length;
+            req->Sec8 = (uint)patch.Sec8Ptr;
+            req->Sec8Len = patch.Sec8.Length;
+            req->Sec21 = (uint)patch.Sec21Ptr;
+            req->Sec21Len = patch.Sec21.Length;
             return 0;
         }
         catch (Exception ex)
@@ -635,7 +706,6 @@ public static unsafe class NativeEntry
         try
         {
             Game.Native = new NativeGame(*api);
-            NativeLog("Game.Stash / Gold / Flags / Party / Turbo / Encounters / Debug / Overlay bound");
             return 0;
         }
         catch (Exception ex)
@@ -804,6 +874,7 @@ public static unsafe class NativeEntry
     {
         try
         {
+            Game.SaveData.Clear();
             ModHost.OnTitleScreen(new TitleScreenEvent());
             ModHost.TryApplyItemText1(NativeLog);
             return 0;
@@ -1093,6 +1164,151 @@ public static unsafe class NativeEntry
         }
     }
 
+    [UnmanagedCallersOnly(EntryPoint = "GrandiaRuntimeHasHdTextureHooks",
+        CallConvs = [typeof(CallConvCdecl)])]
+    public static int HasHdTextureHooks() => ModHost.HasHdTextureHooks ? 1 : 0;
+
+    [UnmanagedCallersOnly(EntryPoint = "GrandiaRuntimeHasHdSpriteMatchHooks",
+        CallConvs = [typeof(CallConvCdecl)])]
+    public static int HasHdSpriteMatchHooks() => ModHost.HasHdSpriteMatchHooks ? 1 : 0;
+
+    [UnmanagedCallersOnly(EntryPoint = "GrandiaRuntimeHasHdSpriteDrawHooks",
+        CallConvs = [typeof(CallConvCdecl)])]
+    public static int HasHdSpriteDrawHooks() => ModHost.HasHdSpriteDrawHooks ? 1 : 0;
+
+    [UnmanagedCallersOnly(EntryPoint = "GrandiaRuntimeOnHdSpriteMatch",
+        CallConvs = [typeof(CallConvCdecl)])]
+    public static int OnHdSpriteMatch(HdSpriteMatchNative* req)
+    {
+        if (req == null)
+        {
+            return -1;
+        }
+
+        try
+        {
+            var path = ModHost.ResolveHdSpriteMatchPath(ReadFixed(req->Path, 260), req->Object);
+            var n = req->RecLen;
+            if (n < 0)
+            {
+                n = 0;
+            }
+
+            if (n > 32)
+            {
+                n = 32;
+            }
+
+            var record = new byte[n];
+            for (var i = 0; i < n; i++)
+            {
+                record[i] = req->Record[i];
+            }
+
+            ModHost.OnHdSpriteMatch(new HdSpriteMatchEvent(path, req->Index, record));
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            NativeLog($"OnHdSpriteMatch: {ex}");
+            return -1;
+        }
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "GrandiaRuntimeOnHdSpriteDraw",
+        CallConvs = [typeof(CallConvCdecl)])]
+    public static int OnHdSpriteDraw(HdSpriteDrawNative* req)
+    {
+        if (req == null)
+        {
+            return -1;
+        }
+
+        try
+        {
+            var path = ModHost.ResolveHdSpriteDrawPath(ReadFixed(req->Path, 260), req->Object);
+            var n = req->RecLen;
+            if (n < 0)
+            {
+                n = 0;
+            }
+
+            if (n > 32)
+            {
+                n = 32;
+            }
+
+            var record = new byte[n];
+            for (var i = 0; i < n; i++)
+            {
+                record[i] = req->Record[i];
+            }
+
+            ModHost.OnHdSpriteDraw(new HdSpriteDrawEvent(
+                path,
+                req->Index,
+                record,
+                new HdSpriteRect(req->LiveX, req->LiveY, req->LiveW, req->LiveH)));
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            NativeLog($"OnHdSpriteDraw: {ex}");
+            return -1;
+        }
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "GrandiaRuntimeOnHdTexture", CallConvs = [typeof(CallConvCdecl)])]
+    public static int OnHdTexture(HdTextureNative* req)
+    {
+        if (req == null)
+        {
+            return -1;
+        }
+
+        try
+        {
+            req->Dest = 0;
+            req->DestLen = 0;
+            var path = ReadFixed(req->Path, 260);
+            if (string.IsNullOrWhiteSpace(path) || req->Src == 0 || req->SrcLen <= 0)
+            {
+                return 0;
+            }
+
+            var src = CopyBytes((byte*)req->Src, req->SrcLen, 48 * 1024 * 1024);
+            Func<byte[], HdPixels?>? decode = null;
+            Func<int, int, byte[], byte[]?>? encode = null;
+            if (req->Decode != 0 && req->Encode != 0 && req->FreeBuf != 0)
+            {
+                var dec = Marshal.GetDelegateForFunctionPointer<HdDecodePngFn>((nint)req->Decode);
+                var enc = Marshal.GetDelegateForFunctionPointer<HdEncodePngFn>((nint)req->Encode);
+                var free = Marshal.GetDelegateForFunctionPointer<HdFreeBufFn>((nint)req->FreeBuf);
+                decode = bytes => DecodePng(dec, free, bytes);
+                encode = (w, h, rgba) => EncodePng(enc, free, w, h, rgba);
+            }
+
+            var ev = new HdTextureEvent(path, src, decode, encode);
+            ModHost.OnHdTexture(ev);
+            if (!ev.TryGetReplacement(out var dest))
+            {
+                return 0;
+            }
+
+            var pin = ModHost.PinHdTexture(dest);
+            req->Dest = (uint)pin;
+            req->DestLen = dest.Length;
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            NativeLog($"OnHdTexture: {ex}");
+            req->Dest = 0;
+            req->DestLen = 0;
+            return -1;
+        }
+    }
+
     [UnmanagedCallersOnly(EntryPoint = "GrandiaRuntimeOnTick", CallConvs = [typeof(CallConvCdecl)])]
     public static int OnTick(TickNative* req)
     {
@@ -1103,6 +1319,7 @@ public static unsafe class NativeEntry
 
         try
         {
+            Game.Overlay.DispatchPromptCallbacks();
             var ev = new TickEvent(new PadState(req->Buttons, req->LeftTrigger, req->RightTrigger));
             ModHost.OnTick(ev);
             req->Block = ev.BlockGameInput ? 1 : 0;
@@ -1125,9 +1342,18 @@ public static unsafe class NativeEntry
 
         try
         {
-            var ev = new SaveEvent(req->Slot, CopyBytes(req->Trailer, req->TrailerLen));
+            var snapshot = Game.SaveData.ExportUtf8();
+            var ev = new SaveEvent(req->Slot, snapshot);
             ModHost.OnSave(ev, NativeLog);
-            req->TrailerLen = WriteBytes(ev.Trailer, req->Trailer);
+            Game.SaveData.AbsorbSaveTrailer(snapshot, ev.Trailer);
+            var payload = Game.SaveData.ExportUtf8();
+            if (payload.Length > GameSaveData.MaxBytes)
+            {
+
+                payload = snapshot.Length <= GameSaveData.MaxBytes ? snapshot : "{}"u8.ToArray();
+            }
+
+            req->TrailerLen = WriteBytes(payload, req->Trailer, GameSaveData.MaxBytes);
             return 0;
         }
         catch (Exception ex)
@@ -1148,8 +1374,19 @@ public static unsafe class NativeEntry
         try
         {
             var phase = req->Phase == 1 ? LoadPhase.Applied : LoadPhase.ConfirmPeek;
-            var ev = new LoadEvent(req->Slot, phase, CopyBytes(req->Trailer, req->TrailerLen),
-                req->Allow != 0);
+            var raw = CopyBytes(req->Trailer, req->TrailerLen, GameSaveData.MaxBytes);
+            GameSaveData data;
+            if (phase == LoadPhase.Applied)
+            {
+                Game.SaveData.ReplaceFromBytes(raw);
+                data = Game.SaveData;
+            }
+            else
+            {
+                data = GameSaveData.Parse(raw);
+            }
+
+            var ev = new LoadEvent(req->Slot, phase, raw, req->Allow != 0, data);
             ModHost.OnLoad(ev, NativeLog);
             req->Allow = ev.Allow ? 1 : 0;
             return 0;
@@ -1231,6 +1468,65 @@ public static unsafe class NativeEntry
         catch (Exception ex)
         {
             NativeLog($"OnBattleLoad: {ex}");
+            return -1;
+        }
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "GrandiaRuntimeOnVictory", CallConvs = [typeof(CallConvCdecl)])]
+    public static int OnVictory(VictoryNative* req)
+    {
+        if (req == null)
+        {
+            return -1;
+        }
+
+        try
+        {
+            var drops = new List<Item>();
+            var n = req->DropCount;
+            if (n < 0)
+            {
+                n = 0;
+            }
+
+            if (n > VictoryEvent.MaxDrops)
+            {
+                n = VictoryEvent.MaxDrops;
+            }
+
+            for (var i = 0; i < n; i++)
+            {
+                if (req->Drop[i] > 0)
+                {
+                    drops.Add((Item)req->Drop[i]);
+                }
+            }
+
+            var ev = new VictoryEvent(req->Exp, req->Gold, drops, new MapId(req->Map),
+                new MapId(req->Dest), req->Spawn, req->EncounterTable, req->EncounterRow);
+            ModHost.OnVictory(ev, NativeLog);
+            req->Exp = ev.Exp;
+            req->Gold = ev.Gold;
+            var written = 0;
+            foreach (var item in ev.Drops)
+            {
+                if (written >= VictoryEvent.MaxDrops)
+                {
+                    break;
+                }
+
+                if (item != Item.None)
+                {
+                    req->Drop[written++] = (int)item;
+                }
+            }
+
+            req->DropCount = written;
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            NativeLog($"OnVictory: {ex}");
             return -1;
         }
     }
@@ -1431,16 +1727,73 @@ public static unsafe class NativeEntry
         }
     }
 
-    private static byte[] CopyBytes(byte* ptr, int len)
+    private static HdPixels? DecodePng(HdDecodePngFn decode, HdFreeBufFn free, byte[] bytes)
+    {
+        if (bytes.Length == 0)
+        {
+            return null;
+        }
+
+        fixed (byte* p = bytes)
+        {
+            int w = 0, h = 0, rgbaLen = 0;
+            byte* rgba = null;
+            if (decode(p, bytes.Length, &w, &h, &rgba, &rgbaLen) == 0 || rgba == null ||
+                w <= 0 || h <= 0 || rgbaLen <= 0)
+            {
+                if (rgba != null)
+                {
+                    free(rgba);
+                }
+
+                return null;
+            }
+
+            var buf = new byte[rgbaLen];
+            Marshal.Copy((nint)rgba, buf, 0, rgbaLen);
+            free(rgba);
+            return new HdPixels(w, h, buf);
+        }
+    }
+
+    private static byte[]? EncodePng(HdEncodePngFn encode, HdFreeBufFn free, int w, int h, byte[] rgba)
+    {
+        if (rgba.Length == 0 || w <= 0 || h <= 0)
+        {
+            return null;
+        }
+
+        fixed (byte* p = rgba)
+        {
+            byte* png = null;
+            var pngLen = 0;
+            if (encode(p, w, h, &png, &pngLen) == 0 || png == null || pngLen <= 0)
+            {
+                if (png != null)
+                {
+                    free(png);
+                }
+
+                return null;
+            }
+
+            var buf = new byte[pngLen];
+            Marshal.Copy((nint)png, buf, 0, pngLen);
+            free(png);
+            return buf;
+        }
+    }
+
+    private static byte[] CopyBytes(byte* ptr, int len, int max = 1024)
     {
         if (ptr == null || len <= 0)
         {
             return [];
         }
 
-        if (len > 1024)
+        if (len > max)
         {
-            len = 1024;
+            len = max;
         }
 
         var buf = new byte[len];
@@ -1448,14 +1801,14 @@ public static unsafe class NativeEntry
         return buf;
     }
 
-    private static int WriteBytes(byte[]? data, byte* dest)
+    private static int WriteBytes(byte[]? data, byte* dest, int max = 1024)
     {
         if (dest == null || data == null || data.Length == 0)
         {
             return 0;
         }
 
-        var n = Math.Min(data.Length, 1024);
+        var n = Math.Min(data.Length, max);
         Marshal.Copy(data, 0, (nint)dest, n);
         return n;
     }

@@ -4,10 +4,25 @@ namespace Grandia.Runtime;
 
 internal static class Sec7Hydrator
 {
-    public static void Attach(Map map, byte[]? mdp, Action<string>? log)
+    private static readonly (HdAssetKind Kind, string Token)[] SpriteKinds =
+    [
+        (HdAssetKind.Anim, "anim"),
+        (HdAssetKind.Tenants, "tenants"),
+        (HdAssetKind.Maps, "maps"),
+        (HdAssetKind.MapEff, "mapeff"),
+    ];
+
+    public static void Attach(Map map, byte[]? mdp, Action<string>? log, string? fieldDir = null)
     {
         map.Zones.Ensure = null;
         map.Hooks.Ensure = null;
+        map.Sfx.Ensure = null;
+        map.Npcs.Ensure = null;
+        map.Anims.Ensure = null;
+        map.SpriteClips.Ensure = null;
+        map.Poses.Ensure = null;
+        map.Sprites.Ensure = null;
+        map.Textures.Ensure = null;
         map.EnsureEncounters = null;
 
         var sec7 = MdpHookIds.TrySlice(mdp, 7);
@@ -29,12 +44,58 @@ internal static class Sec7Hydrator
 
             encounters.AddRange(MapEncounter.FromField(MdpHookIds.TrySlice(mdp, 8), MdpHookIds.TrySlice(mdp, 30)));
             map.HydrateEncounters(encounters);
-            log?.Invoke(
-                $"hydrated {zoneCount} zone(s), {hookCount} hook(s), {map.Encounters.Count} encounter(s) on {map.Stem}");
+            var sfx = MdpSec29.Parse(MdpHookIds.TrySlice(mdp, 29) ?? []);
+            map.Sfx.Hydrate(sfx.Flags, sfx.Range, sfx.Items);
+            var npcs = MdpSec8.Parse(MdpHookIds.TrySlice(mdp, 8) ?? []);
+            map.Npcs.Hydrate(npcs.Instances);
+            var anims = MdpSec21.Parse(MdpHookIds.TrySlice(mdp, 21) ?? []);
+            map.Anims.Hydrate(anims.Items);
+            var sprites = MdpSec23.Parse(MdpHookIds.TrySlice(mdp, 23) ?? []);
+            map.SpriteClips.Hydrate(sprites.Clips);
+            map.Poses.Hydrate(sprites.Poses);
+            var uv = MdpSec32.ParseAll(MdpHookIds.TrySlice(mdp, 32) ?? []);
+            var sheets = LoadSpriteSheets(map.Stem, fieldDir);
+            map.Sprites.Hydrate(uv, sheets);
+            map.Textures.Hydrate(MdpTim.FromMdp(mdp));
+
         }
         catch (Exception ex)
         {
             log?.Invoke($"sec7 hydrate {map.Stem}: {ex.Message}");
         }
+    }
+
+    private static List<MapSpriteSheet> LoadSpriteSheets(string stem, string? fieldDir)
+    {
+        var sheets = new List<MapSpriteSheet>();
+        if (string.IsNullOrWhiteSpace(fieldDir) || !Directory.Exists(fieldDir))
+        {
+            return sheets;
+        }
+
+        foreach (var (kind, token) in SpriteKinds)
+        {
+            var path = Path.Combine(fieldDir, $"{stem}_{token}__spriteinfo.bin");
+            if (!File.Exists(path))
+            {
+                path = Path.Combine(fieldDir, $"{stem.ToLowerInvariant()}_{token}__spriteinfo.bin");
+            }
+
+            if (!File.Exists(path))
+            {
+                continue;
+            }
+
+            try
+            {
+                sheets.Add(MapSpriteBank.FromSpriteInfo(kind, File.ReadAllBytes(path)));
+            }
+            catch (Exception)
+            {
+                // sidecar present but unreadable — leave that sheet empty
+            }
+        }
+
+        return sheets;
     }
 }

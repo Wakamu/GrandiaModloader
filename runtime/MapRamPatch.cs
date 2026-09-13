@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using Grandia.Sdk;
 
 namespace Grandia.Runtime;
 
@@ -22,6 +23,51 @@ internal sealed class RedirectBlob
 internal sealed class MapRamPatch
 {
     public byte[] Sec7 { get; init; } = [];
+    private byte[] _sec29 = [];
+    private byte[] _sec8 = [];
+    private byte[] _sec21 = [];
+
+    public byte[] Sec29
+    {
+        get => _sec29;
+        set
+        {
+            if (_sec29Pin.IsAllocated)
+            {
+                _sec29Pin.Free();
+            }
+
+            _sec29 = value ?? [];
+        }
+    }
+
+    public byte[] Sec8
+    {
+        get => _sec8;
+        set
+        {
+            if (_sec8Pin.IsAllocated)
+            {
+                _sec8Pin.Free();
+            }
+
+            _sec8 = value ?? [];
+        }
+    }
+
+    public byte[] Sec21
+    {
+        get => _sec21;
+        set
+        {
+            if (_sec21Pin.IsAllocated)
+            {
+                _sec21Pin.Free();
+            }
+
+            _sec21 = value ?? [];
+        }
+    }
     public byte[] Scn { get; init; } = [];
     public byte[] Ofs { get; init; } = [];
     public int StockScnLen { get; init; }
@@ -30,6 +76,9 @@ internal sealed class MapRamPatch
     public Dictionary<int, RedirectBlob> Hooks { get; } = [];
 
     private GCHandle _sec7;
+    private GCHandle _sec29Pin;
+    private GCHandle _sec8Pin;
+    private GCHandle _sec21Pin;
     private GCHandle _scn;
     private GCHandle _ofs;
     private bool _pinned;
@@ -38,6 +87,7 @@ internal sealed class MapRamPatch
     {
         if (_pinned)
         {
+            PinHeapCopies();
             return;
         }
 
@@ -67,9 +117,31 @@ internal sealed class MapRamPatch
         }
 
         _pinned = true;
+        PinHeapCopies();
+    }
+
+    private void PinHeapCopies()
+    {
+        if (Sec29.Length > 0 && !_sec29Pin.IsAllocated)
+        {
+            _sec29Pin = GCHandle.Alloc(Sec29, GCHandleType.Pinned);
+        }
+
+        if (Sec8.Length > 0 && !_sec8Pin.IsAllocated)
+        {
+            _sec8Pin = GCHandle.Alloc(Sec8, GCHandleType.Pinned);
+        }
+
+        if (Sec21.Length > 0 && !_sec21Pin.IsAllocated)
+        {
+            _sec21Pin = GCHandle.Alloc(Sec21, GCHandleType.Pinned);
+        }
     }
 
     public nint Sec7Ptr => _sec7.IsAllocated ? _sec7.AddrOfPinnedObject() : 0;
+    public nint Sec29Ptr => _sec29Pin.IsAllocated ? _sec29Pin.AddrOfPinnedObject() : 0;
+    public nint Sec8Ptr => _sec8Pin.IsAllocated ? _sec8Pin.AddrOfPinnedObject() : 0;
+    public nint Sec21Ptr => _sec21Pin.IsAllocated ? _sec21Pin.AddrOfPinnedObject() : 0;
     public nint ScnPtr => _scn.IsAllocated ? _scn.AddrOfPinnedObject() : 0;
     public nint OfsPtr => _ofs.IsAllocated ? _ofs.AddrOfPinnedObject() : 0;
 
@@ -108,6 +180,9 @@ internal static class ScriptArmStore
 internal static class MapRamStore
 {
     internal const int Sec7Budget = 0x4000;
+    internal const int Sec29Budget = MdpSec29.HeapSize;
+    internal const int Sec8Budget = MdpSec8.HeapSize;
+    internal const int Sec21Budget = 0x20000;
     private static readonly Dictionary<string, MapRamPatch?> Patches = new(StringComparer.OrdinalIgnoreCase);
 
     public static bool Has(string stem) => Patches.ContainsKey(stem);

@@ -20,6 +20,12 @@ std::uintptr_t ScanExecutable(HMODULE module, const int* pat, std::size_t n);
 bool SafeReadByte(std::uintptr_t address, std::uint8_t* out_byte);
 bool SafeReadU32(std::uintptr_t address, std::uint32_t* out_value);
 bool SafeReadPointer(std::uintptr_t address, void** out_pointer);
+void ReadMsvcString(std::uintptr_t str, char* dest, int dest_len);
+bool ReadHdAssetPath(std::uintptr_t object, char* dest, int dest_len);
+void NoteHdAssetPath(const char* path);
+bool LastHdSpriteInfoPath(char* dest, int dest_len);
+void BindHdObjectPath(std::uintptr_t object);
+bool LookupHdObjectPath(std::uintptr_t object, char* dest, int dest_len);
 bool SafeWriteByte(std::uintptr_t address, std::uint8_t value);
 bool SafeWriteU32(std::uintptr_t address, std::uint32_t value);
 

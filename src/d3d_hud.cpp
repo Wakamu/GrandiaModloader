@@ -68,10 +68,34 @@ std::vector<PanelLine> g_panel_lines;
 bool g_panel_active = false;
 bool g_panel_dirty = true;
 
+constexpr int kMaxInputChars = 64;
+constexpr UINT kInputLineH = 40;
+constexpr UINT kInputPad = 28;
+
+std::mutex g_input_mu;
+bool g_input_active = false;
+bool g_input_dirty = true;
+bool g_input_caret = true;
+DWORD g_input_caret_tick = 0;
+int g_input_max = 32;
+std::wstring g_input_title;
+std::wstring g_input_text;
+std::wstring g_input_submitted;
+bool g_input_has_submit = false;
+bool g_input_has_cancel = false;
+unsigned g_input_last_pad = 0;
+char g_input_utf8_text[256]{};
+char g_input_utf8_take[256]{};
+
+HWND g_game_hwnd = nullptr;
+WNDPROC g_prev_wndproc = nullptr;
+
 ID3D11Device* g_cached_device = nullptr;
 ID3D11Texture2D* g_overlay_tex = nullptr;
+ID3D11Texture2D* g_toast_tex = nullptr;
 DXGI_FORMAT g_overlay_format = DXGI_FORMAT_UNKNOWN;
 std::vector<std::uint8_t> g_pixel_scratch;
+std::vector<std::uint8_t> g_toast_scratch;
 
 std::atomic<bool> g_logged_first{false};
 std::atomic<bool> g_logged_text_ok{false};
@@ -112,10 +136,138 @@ std::wstring Utf8ToWide(const char* utf8) {
     return out;
 }
 
+void WideToUtf8Buf(const std::wstring& wide, char* dest, std::size_t cap) {
+    if (!dest || cap == 0) {
+        return;
+    }
+    dest[0] = 0;
+    if (wide.empty()) {
+        return;
+    }
+    WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, dest, static_cast<int>(cap), nullptr, nullptr);
+}
+
+void InputMarkDirtyLocked() {
+    g_input_dirty = true;
+}
+
+void InputSubmitLocked() {
+    if (!g_input_active) {
+        return;
+    }
+    g_input_submitted = g_input_text;
+    g_input_has_submit = true;
+    g_input_has_cancel = false;
+    g_input_active = false;
+    InputMarkDirtyLocked();
+}
+
+void InputCancelLocked() {
+    if (!g_input_active) {
+        return;
+    }
+    g_input_active = false;
+    g_input_has_cancel = true;
+    g_input_has_submit = false;
+    InputMarkDirtyLocked();
+}
+
+void InputBackspaceLocked() {
+    if (!g_input_active || g_input_text.empty()) {
+        return;
+    }
+    g_input_text.pop_back();
+    InputMarkDirtyLocked();
+}
+
+void InputCharLocked(wchar_t ch) {
+    if (!g_input_active) {
+        return;
+    }
+    if (ch < 32 || ch == 127) {
+        return;
+    }
+    if (static_cast<int>(g_input_text.size()) >= g_input_max) {
+        return;
+    }
+    g_input_text.push_back(ch);
+    InputMarkDirtyLocked();
+}
+
+LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    const bool active = OverlayInputActive();
+    if (active) {
+        switch (msg) {
+        case WM_CHAR:
+            if (wparam >= 32 && wparam != 127) {
+                std::lock_guard<std::mutex> lock(g_input_mu);
+                InputCharLocked(static_cast<wchar_t>(wparam));
+            }
+            return 0;
+        case WM_KEYDOWN:
+        case WM_SYSKEYDOWN:
+            if (wparam == VK_RETURN) {
+                std::lock_guard<std::mutex> lock(g_input_mu);
+                InputSubmitLocked();
+            } else if (wparam == VK_ESCAPE) {
+                std::lock_guard<std::mutex> lock(g_input_mu);
+                InputCancelLocked();
+            } else if (wparam == VK_BACK) {
+                std::lock_guard<std::mutex> lock(g_input_mu);
+                InputBackspaceLocked();
+            }
+            return 0;
+        case WM_KEYUP:
+        case WM_SYSKEYUP:
+        case WM_SYSCHAR:
+            return 0;
+        default:
+            break;
+        }
+    }
+    if (g_prev_wndproc) {
+        return CallWindowProcW(g_prev_wndproc, hwnd, msg, wparam, lparam);
+    }
+    return DefWindowProcW(hwnd, msg, wparam, lparam);
+}
+
+void AttachGameWndProc(HWND hwnd) {
+    if (!hwnd || !IsWindow(hwnd)) {
+        return;
+    }
+    if (g_game_hwnd == hwnd && g_prev_wndproc) {
+        return;
+    }
+    if (g_game_hwnd && g_prev_wndproc && g_game_hwnd != hwnd) {
+        SetWindowLongPtrW(g_game_hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(g_prev_wndproc));
+        g_prev_wndproc = nullptr;
+        g_game_hwnd = nullptr;
+    }
+    auto* prev = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(
+        hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&OverlayWndProc)));
+    if (!prev) {
+        return;
+    }
+    g_prev_wndproc = prev;
+    g_game_hwnd = hwnd;
+}
+
+void DetachGameWndProc() {
+    if (g_game_hwnd && g_prev_wndproc) {
+        SetWindowLongPtrW(g_game_hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(g_prev_wndproc));
+    }
+    g_prev_wndproc = nullptr;
+    g_game_hwnd = nullptr;
+}
+
 void ReleaseOverlaySurface() {
     if (g_overlay_tex) {
         g_overlay_tex->Release();
         g_overlay_tex = nullptr;
+    }
+    if (g_toast_tex) {
+        g_toast_tex->Release();
+        g_toast_tex = nullptr;
     }
     g_overlay_format = DXGI_FORMAT_UNKNOWN;
 }
@@ -139,8 +291,9 @@ bool EnsureOverlayTexture(ID3D11Device* device, DXGI_FORMAT format) {
         g_cached_device->AddRef();
         g_toast_dirty = true;
         g_panel_dirty = true;
+        g_input_dirty = true;
     }
-    if (g_overlay_tex && g_overlay_format == format) {
+    if (g_overlay_tex && g_toast_tex && g_overlay_format == format) {
         return true;
     }
     ReleaseOverlaySurface();
@@ -160,9 +313,19 @@ bool EnsureOverlayTexture(ID3D11Device* device, DXGI_FORMAT format) {
         }
         return false;
     }
+    const HRESULT hr_toast = device->CreateTexture2D(&td, nullptr, &g_toast_tex);
+    if (FAILED(hr_toast) || !g_toast_tex) {
+        if (!g_logged_text_fail.exchange(true)) {
+            LogWarn("D3D overlay: toast CreateTexture2D failed hr=0x%08X",
+                    static_cast<unsigned>(hr_toast));
+        }
+        ReleaseOverlaySurface();
+        return false;
+    }
     g_overlay_format = format;
     g_toast_dirty = true;
     g_panel_dirty = true;
+    g_input_dirty = true;
     return true;
 }
 
@@ -279,6 +442,35 @@ bool RasterizeLinesToRgba(const std::vector<std::wstring>& lines, const std::vec
     return true;
 }
 
+void CopyOverlayBox(ID3D11DeviceContext* context, ID3D11Texture2D* back_buffer, ID3D11Texture2D* src,
+                    UINT box_w, UINT pixel_h, UINT dst_x, UINT dst_y, UINT dst_w, UINT dst_h) {
+    if (!context || !back_buffer || !src || dst_w <= dst_x || dst_h <= dst_y || pixel_h == 0) {
+        return;
+    }
+    const UINT copy_w = (box_w < dst_w - dst_x) ? box_w : (dst_w - dst_x);
+    const UINT copy_h = (pixel_h < dst_h - dst_y) ? pixel_h : (dst_h - dst_y);
+    D3D11_BOX src_box{};
+    src_box.right = copy_w;
+    src_box.bottom = copy_h;
+    src_box.back = 1;
+    context->CopySubresourceRegion(back_buffer, 0, dst_x, dst_y, 0, src, 0, &src_box);
+}
+
+bool UploadOverlayLayer(ID3D11DeviceContext* context, ID3D11Texture2D* tex,
+                        std::vector<std::uint8_t>* scratch, const std::vector<std::wstring>& lines,
+                        const std::vector<unsigned>& rgbs, UINT box_w, UINT box_h, UINT line_h,
+                        UINT pad, int font_px, bool center_text, UINT pixel_h, bool dirty) {
+    if (!dirty) {
+        return true;
+    }
+    if (!RasterizeLinesToRgba(lines, rgbs, box_w, box_h, line_h, pad, font_px, center_text, pixel_h,
+                              scratch)) {
+        return false;
+    }
+    context->UpdateSubresource(tex, 0, nullptr, scratch->data(), kTexW * 4, kTexW * kTexH * 4);
+    return true;
+}
+
 bool GetActiveToastLines(std::vector<std::wstring>* out_lines, std::vector<unsigned>* out_rgbs,
                          UINT* out_pixel_h) {
     std::lock_guard<std::mutex> lock(g_toast_mu);
@@ -296,6 +488,34 @@ bool GetActiveToastLines(std::vector<std::wstring>* out_lines, std::vector<unsig
     if (*out_pixel_h > kToastH) {
         *out_pixel_h = kToastH;
     }
+    return true;
+}
+
+bool GetActiveInputLines(std::vector<std::wstring>* out_lines, std::vector<unsigned>* out_rgbs,
+                         UINT* out_pixel_h) {
+    std::lock_guard<std::mutex> lock(g_input_mu);
+    if (!g_input_active) {
+        return false;
+    }
+    const DWORD now = GetTickCount();
+    if (now - g_input_caret_tick >= 400) {
+        g_input_caret = !g_input_caret;
+        g_input_caret_tick = now;
+        g_input_dirty = true;
+    }
+    out_lines->clear();
+    out_rgbs->clear();
+    if (!g_input_title.empty()) {
+        out_lines->push_back(g_input_title);
+        out_rgbs->push_back(0xFFE528u);
+    }
+    std::wstring value = L"> " + g_input_text;
+    if (g_input_caret) {
+        value.push_back(L'_');
+    }
+    out_lines->push_back(std::move(value));
+    out_rgbs->push_back(0xF4F4F4u);
+    *out_pixel_h = kInputPad * 2 + static_cast<UINT>(out_lines->size()) * kInputLineH;
     return true;
 }
 
@@ -319,34 +539,55 @@ bool GetActivePanelLines(std::vector<std::wstring>* out_lines, std::vector<unsig
 }
 
 void DrawOverlayText(IDXGISwapChain* swap) {
-    std::vector<std::wstring> lines;
-    std::vector<unsigned> rgbs;
-    UINT pixel_h = 0;
-    bool panel = false;
-    bool dirty = false;
+    std::vector<std::wstring> toast_lines;
+    std::vector<unsigned> toast_rgbs;
+    UINT toast_h = 0;
+    const bool toast = GetActiveToastLines(&toast_lines, &toast_rgbs, &toast_h);
+    bool toast_dirty = false;
     {
-        std::lock_guard<std::mutex> plock(g_panel_mu);
-        if (g_panel_active && !g_panel_lines.empty()) {
-            panel = true;
-            dirty = g_panel_dirty;
-            if (dirty) {
-                g_panel_dirty = false;
+        std::lock_guard<std::mutex> lock(g_toast_mu);
+        toast_dirty = g_toast_dirty;
+        g_toast_dirty = false;
+    }
+
+    std::vector<std::wstring> center_lines;
+    std::vector<unsigned> center_rgbs;
+    UINT center_h = 0;
+    bool input = false;
+    bool panel = false;
+    bool center_dirty = false;
+    {
+        std::lock_guard<std::mutex> ilock(g_input_mu);
+        if (g_input_active) {
+            input = true;
+            center_dirty = g_input_dirty;
+            g_input_dirty = false;
+        }
+    }
+    if (input) {
+        if (!GetActiveInputLines(&center_lines, &center_rgbs, &center_h)) {
+            input = false;
+        } else {
+            std::lock_guard<std::mutex> ilock(g_input_mu);
+            if (g_input_dirty) {
+                center_dirty = true;
+                g_input_dirty = false;
             }
         }
     }
-    if (panel) {
-        if (!GetActivePanelLines(&lines, &rgbs, &pixel_h)) {
-            return;
+    if (!input) {
+        std::lock_guard<std::mutex> plock(g_panel_mu);
+        if (g_panel_active && !g_panel_lines.empty()) {
+            panel = true;
+            center_dirty = g_panel_dirty;
+            g_panel_dirty = false;
         }
-    } else {
-        if (!GetActiveToastLines(&lines, &rgbs, &pixel_h)) {
-            return;
-        }
-        std::lock_guard<std::mutex> lock(g_toast_mu);
-        dirty = g_toast_dirty;
-        if (dirty) {
-            g_toast_dirty = false;
-        }
+    }
+    if (panel && !GetActivePanelLines(&center_lines, &center_rgbs, &center_h)) {
+        panel = false;
+    }
+    if (!toast && !input && !panel) {
+        return;
     }
 
     ID3D11Device* device = nullptr;
@@ -379,24 +620,6 @@ void DrawOverlayText(IDXGISwapChain* swap) {
         device->Release();
         return;
     }
-    if (dirty) {
-        const UINT box_w = panel ? kPanelW : kToastW;
-        const UINT box_h = panel ? kPanelH : kToastH;
-        const UINT line_h = panel ? kPanelLineH : kToastLineH;
-        const UINT pad = panel ? kPanelPad : kToastPadY;
-        const int font_px = panel ? static_cast<int>(kPanelFontPx) : 22;
-        if (!RasterizeLinesToRgba(lines, rgbs, box_w, box_h, line_h, pad, font_px, panel, pixel_h,
-                                  &g_pixel_scratch)) {
-            if (!g_logged_text_fail.exchange(true)) {
-                LogWarn("D3D overlay: GDI rasterize failed");
-            }
-            context->Release();
-            device->Release();
-            return;
-        }
-        context->UpdateSubresource(g_overlay_tex, 0, nullptr, g_pixel_scratch.data(), kTexW * 4,
-                                   kTexW * kTexH * 4);
-    }
 
     ID3D11Texture2D* back_buffer = nullptr;
     if (FAILED(swap->GetBuffer(0, IID_PPV_ARGS(&back_buffer))) || !back_buffer) {
@@ -406,33 +629,54 @@ void DrawOverlayText(IDXGISwapChain* swap) {
     }
     const UINT dst_w = desc.BufferDesc.Width;
     const UINT dst_h = desc.BufferDesc.Height;
-    const UINT box_w = panel ? kPanelW : kToastW;
-    UINT dst_x = panel ? ((dst_w > box_w) ? (dst_w - box_w) / 2u : 0u) : static_cast<UINT>(kToastX);
-    UINT dst_y = panel ? ((dst_h > pixel_h) ? (dst_h - pixel_h) / 2u : 0u) : static_cast<UINT>(kToastY);
-    if (dst_w > dst_x && dst_h > dst_y) {
-        const UINT copy_w = (box_w < dst_w - dst_x) ? box_w : (dst_w - dst_x);
-        const UINT copy_h = (pixel_h < dst_h - dst_y) ? pixel_h : (dst_h - dst_y);
-        D3D11_BOX src_box{};
-        src_box.right = copy_w;
-        src_box.bottom = copy_h;
-        src_box.back = 1;
-        context->CopySubresourceRegion(back_buffer, 0, dst_x, dst_y, 0, g_overlay_tex, 0, &src_box);
+
+    if (toast) {
+        if (!UploadOverlayLayer(context, g_toast_tex, &g_toast_scratch, toast_lines, toast_rgbs,
+                                kToastW, kToastH, kToastLineH, kToastPadY, 22, false, toast_h,
+                                toast_dirty)) {
+            if (!g_logged_text_fail.exchange(true)) {
+                LogWarn("D3D overlay: GDI rasterize failed");
+            }
+        } else {
+            CopyOverlayBox(context, back_buffer, g_toast_tex, kToastW, toast_h,
+                           static_cast<UINT>(kToastX), static_cast<UINT>(kToastY), dst_w, dst_h);
+        }
     }
+
+    if (input || panel) {
+        if (!UploadOverlayLayer(context, g_overlay_tex, &g_pixel_scratch, center_lines, center_rgbs,
+                                kPanelW, kPanelH, kPanelLineH, kPanelPad,
+                                static_cast<int>(kPanelFontPx), panel && !input, center_h,
+                                center_dirty)) {
+            if (!g_logged_text_fail.exchange(true)) {
+                LogWarn("D3D overlay: GDI rasterize failed");
+            }
+        } else {
+            const UINT dst_x = (dst_w > kPanelW) ? (dst_w - kPanelW) / 2u : 0u;
+            const UINT dst_y = (dst_h > center_h) ? (dst_h - center_h) / 2u : 0u;
+            CopyOverlayBox(context, back_buffer, g_overlay_tex, kPanelW, center_h, dst_x, dst_y,
+                           dst_w, dst_h);
+        }
+    }
+
     back_buffer->Release();
     context->Release();
     device->Release();
     if (!g_logged_text_ok.exchange(true)) {
-        LogInfo("D3D overlay: toast + center panel ready");
+
     }
 }
 
 HRESULT __stdcall PresentHook(IDXGISwapChain* swap, UINT sync_interval, UINT flags) {
     SwallowBlockedGamePad();
     if (swap && (flags & DXGI_PRESENT_TEST) == 0) {
-        if (!g_logged_first.exchange(true)) {
-            DXGI_SWAP_CHAIN_DESC desc{};
-            if (SUCCEEDED(swap->GetDesc(&desc))) {
-                LogInfo("D3D Present hooked (%ux%u)", desc.BufferDesc.Width, desc.BufferDesc.Height);
+        DXGI_SWAP_CHAIN_DESC desc{};
+        if (SUCCEEDED(swap->GetDesc(&desc))) {
+            if (desc.OutputWindow) {
+                AttachGameWndProc(desc.OutputWindow);
+            }
+            if (!g_logged_first.exchange(true)) {
+
             }
         }
         DrawOverlayText(swap);
@@ -594,6 +838,88 @@ bool OverlayPanelActive() {
     return g_panel_active;
 }
 
+int OverlayInputOpen(const char* title, const char* initial, int max_len) {
+    int cap = max_len;
+    if (cap < 1) {
+        cap = 32;
+    }
+    if (cap > kMaxInputChars) {
+        cap = kMaxInputChars;
+    }
+    std::lock_guard<std::mutex> lock(g_input_mu);
+    g_input_title = Utf8ToWide(title);
+    g_input_text = Utf8ToWide(initial);
+    if (static_cast<int>(g_input_text.size()) > cap) {
+        g_input_text.resize(static_cast<std::size_t>(cap));
+    }
+    g_input_max = cap;
+    g_input_active = true;
+    g_input_has_submit = false;
+    g_input_has_cancel = false;
+    g_input_submitted.clear();
+    g_input_caret = true;
+    g_input_caret_tick = GetTickCount();
+    g_input_last_pad = 0xFFFFFFFFu;
+    InputMarkDirtyLocked();
+    return 1;
+}
+
+void OverlayInputClose() {
+    std::lock_guard<std::mutex> lock(g_input_mu);
+    g_input_active = false;
+    g_input_has_submit = false;
+    g_input_has_cancel = false;
+    InputMarkDirtyLocked();
+}
+
+bool OverlayInputActive() {
+    std::lock_guard<std::mutex> lock(g_input_mu);
+    return g_input_active;
+}
+
+const char* OverlayInputText() {
+    std::lock_guard<std::mutex> lock(g_input_mu);
+    WideToUtf8Buf(g_input_text, g_input_utf8_text, sizeof(g_input_utf8_text));
+    return g_input_utf8_text;
+}
+
+const char* OverlayInputTake() {
+    std::lock_guard<std::mutex> lock(g_input_mu);
+    if (!g_input_has_submit) {
+        return nullptr;
+    }
+    WideToUtf8Buf(g_input_submitted, g_input_utf8_take, sizeof(g_input_utf8_take));
+    g_input_has_submit = false;
+    g_input_submitted.clear();
+    return g_input_utf8_take;
+}
+
+int OverlayInputTakeCancel() {
+    std::lock_guard<std::mutex> lock(g_input_mu);
+    if (!g_input_has_cancel) {
+        return 0;
+    }
+    g_input_has_cancel = false;
+    return 1;
+}
+
+void OverlayInputOnTick(unsigned pad_packed) {
+    constexpr unsigned kPadConfirm = 0x1010u;
+    constexpr unsigned kPadCancel = 0x2000u;
+    std::lock_guard<std::mutex> lock(g_input_mu);
+    if (!g_input_active) {
+        g_input_last_pad = pad_packed;
+        return;
+    }
+    const unsigned rose = pad_packed & ~g_input_last_pad;
+    g_input_last_pad = pad_packed;
+    if (rose & kPadConfirm) {
+        InputSubmitLocked();
+    } else if (rose & kPadCancel) {
+        InputCancelLocked();
+    }
+}
+
 bool IsD3dHudInstalled() {
     return g_present_site != nullptr;
 }
@@ -613,8 +939,7 @@ bool InstallD3dHud() {
     }
     g_present_site = present;
     g_present_patch_size = patch_size;
-    LogInfo("D3D overlay installed (Present@0x%08X, patch=%zu)",
-            static_cast<unsigned>(reinterpret_cast<std::uintptr_t>(present)), patch_size);
+
     OverlayToast("GrandiaMod overlay ready", 4000, 0x7CFC00u);
     return true;
 }
@@ -630,6 +955,8 @@ void RemoveD3dHud() {
     }
     OverlayClearToasts();
     OverlayClearPanel();
+    OverlayInputClose();
+    DetachGameWndProc();
     ReleaseDeviceResources();
 }
 
@@ -661,4 +988,29 @@ extern "C" int ModOverlayClearPanel() {
 
 extern "C" int ModOverlayPanelActive() {
     return grandia_mod::OverlayPanelActive() ? 1 : 0;
+}
+
+extern "C" int ModOverlayInputOpen(const char* title, const char* initial, int max_len) {
+    return grandia_mod::OverlayInputOpen(title, initial, max_len);
+}
+
+extern "C" int ModOverlayInputClose() {
+    grandia_mod::OverlayInputClose();
+    return 1;
+}
+
+extern "C" int ModOverlayInputActive() {
+    return grandia_mod::OverlayInputActive() ? 1 : 0;
+}
+
+extern "C" const char* ModOverlayInputText() {
+    return grandia_mod::OverlayInputText();
+}
+
+extern "C" const char* ModOverlayInputTake() {
+    return grandia_mod::OverlayInputTake();
+}
+
+extern "C" int ModOverlayInputTakeCancel() {
+    return grandia_mod::OverlayInputTakeCancel();
 }

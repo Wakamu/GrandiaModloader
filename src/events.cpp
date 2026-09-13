@@ -14,7 +14,11 @@
 #include "catalog.h"
 #include "dialogue.h"
 #include "movie_skip.h"
+#include "menu.h"
 #include "travel.h"
+#include "hd_match.h"
+#include "hd_draw.h"
+#include "xp.h"
 
 #include <Windows.h>
 
@@ -257,14 +261,14 @@ std::uintptr_t ResolveChestFlagWriteSite() {
     const auto base = reinterpret_cast<std::uintptr_t>(module);
     const auto scanned = ScanChestFlagSite(module);
     if (scanned) {
-        LogInfo("flag write site via AOB at grandia.exe+0x%X", static_cast<unsigned>(scanned - base));
+
         return scanned;
     }
     const std::uintptr_t fallbacks[] = {kChestFlagWriteRvaSteam, kChestFlagWriteRvaAlt};
     for (const std::uintptr_t rva : fallbacks) {
         const auto site = base + rva;
         if (IsChestFlagWriteSite(site)) {
-            LogInfo("flag write site via RVA grandia.exe+0x%X", static_cast<unsigned>(rva));
+
             return site;
         }
     }
@@ -403,7 +407,7 @@ bool InstallChestFlagHook(std::uintptr_t site) {
         g_mod_chest_flag_eax_src = 0;
         return false;
     }
-    LogInfo("OnEventFlag hook at grandia.exe+0x%X", static_cast<unsigned>(site - ModuleBase()));
+
     return true;
 #endif
 }
@@ -429,7 +433,7 @@ bool InstallAssignUiHook() {
         g_mod_assign_return = nullptr;
         return false;
     }
-    LogInfo("OnItemAssignUi hook at grandia.exe+0x%X", static_cast<unsigned>(kAssignUiEntryRva));
+
     return true;
 #endif
 }
@@ -489,7 +493,7 @@ bool InstallFieldGoldHook() {
         g_field_gold_site = nullptr;
         return false;
     }
-    LogInfo("OnFieldGoldAdd hook at grandia.exe+0x%X", static_cast<unsigned>(kFieldGoldAddRva));
+
     return true;
 #endif
 }
@@ -532,6 +536,9 @@ bool InstallGameHooks() {
     if (!InstallQolHooks()) {
         LogWarn("QoL turbo / OnTick hooks not installed");
     }
+    if (!InstallXpHooks()) {
+        LogWarn("XP multiplier hooks not installed — magic/skill/level XP stay vanilla");
+    }
     if (!InstallTitleScreenHook()) {
         LogWarn("OnTitleScreen hook not installed");
     }
@@ -541,18 +548,31 @@ bool InstallGameHooks() {
     if (!InstallMovieSkipHook()) {
         LogWarn("FMV Start skip not installed");
     }
+    if (!InstallMenuHooks()) {
+        LogWarn("Game.Menu hooks not installed");
+    }
+    if (!InstallHdMatchHook()) {
+        LogWarn("OnHdSpriteMatch hook not installed");
+    }
+    if (!InstallHdDrawHook()) {
+        LogWarn("OnHdSpriteDraw hook not installed");
+    }
     if (ok == 0) {
         LogWarn("no game hooks installed");
         return false;
     }
-    LogInfo("game hooks ready (%d/6)", ok);
+
     return true;
 }
 
 void RemoveGameHooks() {
+    RemoveHdDrawHook();
+    RemoveHdMatchHook();
+    RemoveMenuHooks();
     RemoveMovieSkipHook();
     RemoveCatalogHooks();
     RemoveTitleScreenHook();
+    RemoveXpHooks();
     RemoveQolHooks();
     RemoveDialogueHook();
     RemoveScriptRedirectHooks();

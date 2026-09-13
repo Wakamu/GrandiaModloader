@@ -186,3 +186,35 @@ public sealed class OnDialogueAttribute : GameHookAttribute
     {
     }
 }
+
+[AttributeUsage(AttributeTargets.Method)]
+public sealed class OnHdTextureAttribute : GameHookAttribute
+{
+    public OnHdTextureAttribute() : base(typeof(HdTextureEvent))
+    {
+    }
+}
+
+[AttributeUsage(AttributeTargets.Method)]
+public sealed class OnHdSpriteMatchAttribute : GameHookAttribute
+{
+    public OnHdSpriteMatchAttribute() : base(typeof(HdSpriteMatchEvent))
+    {
+    }
+}
+
+[AttributeUsage(AttributeTargets.Method)]
+public sealed class OnHdSpriteDrawAttribute : GameHookAttribute
+{
+    public OnHdSpriteDrawAttribute() : base(typeof(HdSpriteDrawEvent))
+    {
+    }
+}
+
+[AttributeUsage(AttributeTargets.Method)]
+public sealed class OnVictoryAttribute : GameHookAttribute
+{
+    public OnVictoryAttribute() : base(typeof(VictoryEvent))
+    {
+    }
+}

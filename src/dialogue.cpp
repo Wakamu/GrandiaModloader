@@ -346,8 +346,7 @@ bool InstallDialogueHook() {
         RemoveDialogueHook();
         return false;
     }
-    LogInfo("OnDialogue hook at +0x%X (type-1 / type-8%s)", static_cast<unsigned>(kCmdDispatchRva),
-            g_mod_dialogue_continue ? ", Skip" : "");
+
     return true;
 #endif
 }

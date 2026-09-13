@@ -3,6 +3,8 @@
 #include "hook_util.h"
 #include "log.h"
 #include "party.h"
+#include "field_run.h"
+#include "travel.h"
 #include "virt_file.h"
 
 extern "C" int ModTurboGet();
@@ -22,6 +24,39 @@ extern "C" int ModOverlayClearToasts();
 extern "C" int ModOverlaySetPanel(const char* joined, const unsigned* rgbs, int count);
 extern "C" int ModOverlayClearPanel();
 extern "C" int ModOverlayPanelActive();
+extern "C" int ModMenuOpen(const char* title, const char* joined, int count);
+extern "C" int ModMenuClose();
+extern "C" int ModMenuIsOpen();
+extern "C" int ModMenuCursor();
+extern "C" int ModMenuTakeChoice();
+extern "C" int ModMenuTakeCancel();
+extern "C" int ModMenuOption();
+extern "C" int ModGameStatus();
+extern "C" int ModWarpTo(int dest, int spawn, int aux9, int auxA);
+extern "C" int ModRunField(int kind, int id, int table, const void* bytes, int len);
+extern "C" int ModQuit();
+extern "C" int ModXpGet(int kind);
+extern "C" int ModXpSet(int kind, int multiplier);
+extern "C" int ModOverlayInputOpen(const char* title, const char* initial, int max_len);
+extern "C" int ModOverlayInputClose();
+extern "C" int ModOverlayInputActive();
+extern "C" const char* ModOverlayInputText();
+extern "C" const char* ModOverlayInputTake();
+extern "C" int ModOverlayInputTakeCancel();
+extern "C" int ModSfxEmitterCount();
+extern "C" int ModSfxEmitterRange();
+extern "C" int ModSfxEmitterGet(int index, int* rec_id, int* sfx, int* flags, int* x, int* y,
+                                int* z, int* muted);
+extern "C" int ModSfxEmitterMove(int index, int x, int y, int z);
+extern "C" int ModSfxEmitterMute(int index, int muted);
+extern "C" int ModSfxEmitterSetSfx(int index, int sfx);
+extern "C" int ModSfxEmitterAdd(int rec_id, int sfx, int flags, int x, int y, int z, int kind,
+                               int period, int bias);
+extern "C" int ModSfxEmitterRemove(int index);
+extern "C" int ModSfxEmitterSetFlags(int index, int flags);
+extern "C" int ModCameraWalkGet(int* x, int* y, int* z);
+extern "C" int ModHashPs1Sprite(int tpage, int u, int v, int width, int height, unsigned* key);
+extern "C" int ModReadPs1Vram(int which, void* dest, int dest_len);
 
 #include <Windows.h>
 
@@ -67,21 +102,18 @@ bool AdoptStashBase(std::uintptr_t candidate, const char* reason) {
     if (!IsPlausibleStashBase(candidate)) {
         return false;
     }
-    if (g_stash_base == 0) {
+    if (g_stash_base != candidate) {
+        LogInfo("stash base 0x%08X (%s)%s", static_cast<unsigned>(candidate), reason,
+                g_stash_base ? " [updated]" : "");
         g_stash_base = candidate;
-        LogInfo("stash base 0x%08X (%s)", static_cast<unsigned>(candidate), reason);
-        return true;
     }
-    return g_stash_base == candidate;
+    return true;
 }
 
 bool EnsureStashBase() {
-    if (g_stash_base != 0) {
-        return true;
-    }
     const auto base = ModuleBase();
     if (base == 0) {
-        return false;
+        return g_stash_base != 0 && IsPlausibleStashBase(g_stash_base);
     }
 
     void* published = nullptr;
@@ -98,7 +130,7 @@ bool EnsureStashBase() {
             return true;
         }
     }
-    return false;
+    return g_stash_base != 0 && IsPlausibleStashBase(g_stash_base);
 }
 
 bool EnsureFlagBlob() {
@@ -114,7 +146,7 @@ bool EnsureFlagBlob() {
         return false;
     }
     g_flag_blob = reinterpret_cast<std::uintptr_t>(blob);
-    LogInfo("flag blob 0x%08X ([+0x318BD8])", static_cast<unsigned>(g_flag_blob));
+
     return true;
 }
 
@@ -222,8 +254,7 @@ bool InstallGoldPtrHook() {
         LogWarn("failed to install GetGoldPtr hook");
         return false;
     }
-    LogInfo("Gold.Add capture at grandia.exe+0x%X (open Status, or pick a gold chest)",
-            static_cast<unsigned>(site - ModuleBase()));
+
     return true;
 #endif
 }
@@ -250,8 +281,17 @@ void AdoptFlagBlob(std::uintptr_t blob) {
     }
     if (g_flag_blob == 0) {
         g_flag_blob = blob;
-        LogInfo("flag blob 0x%08X (flag-write ESI)", static_cast<unsigned>(blob));
+
     }
+}
+
+void ResetLiveSavePointers() {
+    {
+        std::lock_guard<std::mutex> lock(g_gold_lock);
+        g_mod_gold_base = 0;
+    }
+    g_stash_base = 0;
+
 }
 
 extern "C" int ModStashAdd(int item_id, int delta) {
@@ -355,7 +395,7 @@ extern "C" int ModFlagSet(unsigned event_id, int value) {
     if (!SafeWriteByte(addr, next)) {
         return 0;
     }
-    LogInfo("Flags.Set event=0x%04X %s", event_id, value ? "on" : "off");
+
     return 1;
 }
 
@@ -405,6 +445,465 @@ extern "C" int ModPartyWalkGet(int* x, int* y, int* z) {
     return 1;
 }
 
+extern "C" int ModCameraWalkGet(int* x, int* y, int* z) {
+    // Field camera look-at 16.16. Preferred image 0x400000 → VA
+    // 0x71931C / 0x719320 / 0x719324. SFX tick +0x2CD0 shifts these
+    // into listener 71E840 / 71E858 / 71E83C (plus a small look-ahead).
+    constexpr std::uintptr_t kCamXRva = 0x31931Cu;
+    constexpr std::uintptr_t kCamYRva = 0x319320u;
+    constexpr std::uintptr_t kCamZRva = 0x319324u;
+    if (!x || !y || !z) {
+        return 0;
+    }
+    *x = *y = *z = 0;
+    const auto base = ModuleBase();
+    if (base == 0) {
+        return 0;
+    }
+    auto axis = [](std::uintptr_t addr, int* out) -> bool {
+        std::uint32_t raw = 0;
+        if (!SafeReadU32(addr, &raw)) {
+            return false;
+        }
+        const auto rounded = static_cast<std::int32_t>(raw) + 0x8000;
+        *out = static_cast<int>(static_cast<std::int16_t>(rounded >> 16));
+        return true;
+    };
+    if (!axis(base + kCamXRva, x) || !axis(base + kCamYRva, y) || !axis(base + kCamZRva, z)) {
+        return 0;
+    }
+    return 1;
+}
+
+extern "C" int ModGameStatus() {
+    constexpr std::uintptr_t kMenuModeRva = 0x31942Cu;
+    constexpr std::uintptr_t kBattleModeRva = 0x31CD4Bu;
+    const auto base = ModuleBase();
+    if (base == 0) {
+        return 0;
+    }
+    std::uint8_t battle = 0;
+    if (SafeReadByte(base + kBattleModeRva, &battle) && (battle == 2 || battle == 3)) {
+        return 3;
+    }
+    std::uint32_t menu = 0;
+    if (SafeReadU32(base + kMenuModeRva, &menu) && menu == 3) {
+        return 2;
+    }
+    if (menu == 2 || ModMenuIsOpen() != 0) {
+        return 1;
+    }
+    return 0;
+}
+
+extern "C" int ModWarpTo(int dest, int spawn, int aux9, int auxA) {
+    return QueueMapTravel(static_cast<unsigned>(dest), static_cast<unsigned>(spawn),
+                          static_cast<unsigned>(aux9), static_cast<unsigned>(auxA));
+}
+
+extern "C" int ModRunField(int kind, int id, int table, const void* bytes, int len) {
+    return QueueFieldRun(kind, id, table, bytes, len);
+}
+
+namespace {
+
+// Live sec[29] emitter table. Mixer walks [0x640E4C] (copy+8). Preferred
+// image base 0x400000 — never match on-disk immediates.
+constexpr std::uintptr_t kSfxTablePtrRva = 0x240E4Cu;
+constexpr unsigned kSfxRecSize = 0x10u;
+constexpr int kSfxMaxEmitters = 250;
+constexpr int kSfxHeapLiveMax = 62;  // (1024-8)/16 - terminator
+
+bool ReadS16(std::uintptr_t addr, int* out) {
+    std::uint8_t lo = 0;
+    std::uint8_t hi = 0;
+    if (!out || !SafeReadByte(addr, &lo) || !SafeReadByte(addr + 1, &hi)) {
+        return false;
+    }
+    *out = static_cast<int>(static_cast<std::int16_t>(lo | (static_cast<unsigned>(hi) << 8)));
+    return true;
+}
+
+bool WriteS16(std::uintptr_t addr, int value) {
+    if (value < -32768) {
+        value = -32768;
+    }
+    if (value > 32767) {
+        value = 32767;
+    }
+    const auto w = static_cast<std::uint16_t>(static_cast<std::int16_t>(value));
+    return SafeWriteByte(addr, static_cast<std::uint8_t>(w & 0xFF)) &&
+           SafeWriteByte(addr + 1, static_cast<std::uint8_t>(w >> 8));
+}
+
+std::uintptr_t SfxTableBase() {
+    const auto base = ModuleBase();
+    if (base == 0) {
+        return 0;
+    }
+    void* table = nullptr;
+    if (!SafeReadPointer(base + kSfxTablePtrRva, &table) || !table) {
+        return 0;
+    }
+    const auto addr = reinterpret_cast<std::uintptr_t>(table);
+    if (addr < 0x10000) {
+        return 0;
+    }
+    std::uint8_t probe = 0;
+    if (!SafeReadByte(addr, &probe)) {
+        return 0;
+    }
+    return addr;
+}
+
+std::uintptr_t SfxRecord(int index) {
+    if (index < 0 || index >= kSfxMaxEmitters) {
+        return 0;
+    }
+    const auto table = SfxTableBase();
+    if (table == 0) {
+        return 0;
+    }
+    const auto rec = table + static_cast<unsigned>(index) * kSfxRecSize;
+    std::uint8_t rec_id = 0;
+    if (!SafeReadByte(rec, &rec_id) || rec_id == 0xFF) {
+        return 0;
+    }
+    return rec;
+}
+
+int SfxLiveCount() {
+    const auto table = SfxTableBase();
+    if (table == 0) {
+        return 0;
+    }
+    int n = 0;
+    for (; n < kSfxMaxEmitters; ++n) {
+        std::uint8_t rec_id = 0;
+        if (!SafeReadByte(table + static_cast<unsigned>(n) * kSfxRecSize, &rec_id) ||
+            rec_id == 0xFF) {
+            break;
+        }
+    }
+    return n;
+}
+
+}  // namespace
+
+extern "C" int ModSfxEmitterCount() {
+    return SfxLiveCount();
+}
+
+extern "C" int ModSfxEmitterRange() {
+    const auto table = SfxTableBase();
+    if (table < 8) {
+        return 0;
+    }
+    std::uint32_t range = 0;
+    if (!SafeReadU32(table - 4, &range)) {
+        return 0;
+    }
+    if (range > 0x10000u) {
+        return 0;
+    }
+    return static_cast<int>(range);
+}
+
+extern "C" int ModSfxEmitterGet(int index, int* rec_id, int* sfx, int* flags, int* x, int* y,
+                                int* z, int* muted) {
+    const auto rec = SfxRecord(index);
+    if (rec == 0) {
+        return 0;
+    }
+    std::uint8_t idb = 0;
+    std::uint8_t kind = 0;
+    std::uint8_t sfxb = 0;
+    std::uint8_t flg = 0;
+    int px = 0;
+    int py = 0;
+    int pz = 0;
+    if (!SafeReadByte(rec, &idb) || !SafeReadByte(rec + 2, &kind) ||
+        !SafeReadByte(rec + 3, &sfxb) || !SafeReadByte(rec + 4, &flg) || !ReadS16(rec + 0xA, &px) ||
+        !ReadS16(rec + 0xC, &py) || !ReadS16(rec + 0xE, &pz)) {
+        return 0;
+    }
+    if (rec_id) {
+        *rec_id = idb;
+    }
+    if (sfx) {
+        *sfx = sfxb;
+    }
+    if (flags) {
+        *flags = flg;
+    }
+    if (x) {
+        *x = px;
+    }
+    if (y) {
+        *y = py;
+    }
+    if (z) {
+        *z = pz;
+    }
+    if (muted) {
+        *muted = (kind & 0x80) == 0 ? 1 : 0;
+    }
+    return 1;
+}
+
+extern "C" int ModSfxEmitterMove(int index, int x, int y, int z) {
+    const auto rec = SfxRecord(index);
+    if (rec == 0) {
+        return 0;
+    }
+    if (!WriteS16(rec + 0xA, x) || !WriteS16(rec + 0xC, y) || !WriteS16(rec + 0xE, z)) {
+        return 0;
+    }
+    return 1;
+}
+
+extern "C" int ModSfxEmitterMute(int index, int muted) {
+    const auto rec = SfxRecord(index);
+    if (rec == 0) {
+        return 0;
+    }
+    std::uint8_t kind = 0;
+    if (!SafeReadByte(rec + 2, &kind)) {
+        return 0;
+    }
+    const std::uint8_t next =
+        muted ? static_cast<std::uint8_t>(kind & 0x7F) : static_cast<std::uint8_t>(kind | 0x80);
+    if (next == kind) {
+        return 1;
+    }
+    return SafeWriteByte(rec + 2, next) ? 1 : 0;
+}
+
+extern "C" int ModSfxEmitterSetSfx(int index, int sfx) {
+    const auto rec = SfxRecord(index);
+    if (rec == 0) {
+        return 0;
+    }
+    if (sfx < 0) {
+        sfx = 0;
+    }
+    if (sfx > 255) {
+        sfx = 255;
+    }
+    return SafeWriteByte(rec + 3, static_cast<std::uint8_t>(sfx)) ? 1 : 0;
+}
+
+static int SfxClampU8(int value) {
+    if (value < 0) {
+        return 0;
+    }
+    if (value > 255) {
+        return 255;
+    }
+    return value;
+}
+
+static int NextSfxRecId(std::uintptr_t table, int live) {
+    bool used[256]{};
+    used[0xF4] = true;
+    used[0xFF] = true;
+    for (int i = 0; i < live; ++i) {
+        std::uint8_t id = 0;
+        if (SafeReadByte(table + static_cast<unsigned>(i) * kSfxRecSize, &id)) {
+            used[id] = true;
+        }
+    }
+    for (int id = 0; id < 0xFF; ++id) {
+        if (!used[id]) {
+            return id;
+        }
+    }
+    return 0;
+}
+
+extern "C" int ModSfxEmitterAdd(int rec_id, int sfx, int flags, int x, int y, int z, int kind,
+                               int period, int bias) {
+    const auto table = SfxTableBase();
+    if (table == 0) {
+        return -1;
+    }
+    const int n = SfxLiveCount();
+    if (n < 0 || n >= kSfxHeapLiveMax) {
+        return -1;
+    }
+    const auto rec = table + static_cast<unsigned>(n) * kSfxRecSize;
+    int id = rec_id;
+    if (id <= 0 || id >= 0xFF || id == 0xF4) {
+        id = NextSfxRecId(table, n);
+    }
+    if (kind == 0) {
+        kind = 0x81;
+    }
+    if (!SafeWriteByte(rec, static_cast<std::uint8_t>(SfxClampU8(id))) ||
+        !SafeWriteByte(rec + 1, 0xFF) ||
+        !SafeWriteByte(rec + 2, static_cast<std::uint8_t>(SfxClampU8(kind))) ||
+        !SafeWriteByte(rec + 3, static_cast<std::uint8_t>(SfxClampU8(sfx))) ||
+        !SafeWriteByte(rec + 4, static_cast<std::uint8_t>(SfxClampU8(flags))) ||
+        !SafeWriteByte(rec + 5, static_cast<std::uint8_t>(SfxClampU8(period))) ||
+        !SafeWriteByte(rec + 6, 0xFF) ||
+        !SafeWriteByte(rec + 7, static_cast<std::uint8_t>(SfxClampU8(bias))) ||
+        !WriteS16(rec + 0xA, x) || !WriteS16(rec + 0xC, y) || !WriteS16(rec + 0xE, z) ||
+        !SafeWriteByte(rec + kSfxRecSize, 0xFF)) {
+        return -1;
+    }
+    return n;
+}
+
+extern "C" int ModSfxEmitterRemove(int index) {
+    const auto table = SfxTableBase();
+    if (table == 0) {
+        return 0;
+    }
+    const int n = SfxLiveCount();
+    if (index < 0 || index >= n) {
+        return 0;
+    }
+    for (int i = index; i < n - 1; ++i) {
+        const auto dst = table + static_cast<unsigned>(i) * kSfxRecSize;
+        const auto src = table + static_cast<unsigned>(i + 1) * kSfxRecSize;
+        for (unsigned b = 0; b < kSfxRecSize; ++b) {
+            std::uint8_t v = 0;
+            if (!SafeReadByte(src + b, &v) || !SafeWriteByte(dst + b, v)) {
+                return 0;
+            }
+        }
+    }
+    return SafeWriteByte(table + static_cast<unsigned>(n - 1) * kSfxRecSize, 0xFF) ? 1 : 0;
+}
+
+extern "C" int ModSfxEmitterSetFlags(int index, int flags) {
+    const auto rec = SfxRecord(index);
+    if (rec == 0) {
+        return 0;
+    }
+    return SafeWriteByte(rec + 4, static_cast<std::uint8_t>(SfxClampU8(flags))) ? 1 : 0;
+}
+
+extern "C" int ModHashPs1Sprite(int tpage, int u, int v, int width, int height, unsigned* key) {
+    if (!key || width <= 0 || height <= 0 || u < 0 || v < 0) {
+        return 0;
+    }
+    *key = 0;
+
+    const int bpp = (tpage & 0x180) == 0 ? 4 : 2;
+    const int page_x = (tpage & 0xF) << 6;
+    const int page_y = (tpage & 0x10) << 4;
+    const int vram_x = page_x + u / bpp;
+    const int vram_y = page_y + v;
+    const int word_w = (width + 1) / bpp;
+    if (word_w <= 0 || vram_x < 0 || vram_y < 0 || word_w > 256 || height > 256
+        || vram_y + height > 512 || vram_x + word_w > 1024) {
+        return 0;
+    }
+
+    void* vram = nullptr;
+    if (!SafeReadPointer(ModuleBase() + 0x23F880u, &vram) || !vram) {
+        return 0;
+    }
+
+    auto hash_buf = [&](void* buf) -> int {
+        const auto base = reinterpret_cast<std::uintptr_t>(buf);
+        constexpr unsigned kOff = 0x811C9DC5u;
+        constexpr unsigned kPrime = 0x01000193u;
+        unsigned hash = 0;
+        bool any = false;
+        for (int row = 0; row < height; ++row) {
+            auto at = base + static_cast<std::uintptr_t>((vram_y + row) * 1024 + vram_x) * 2u;
+            for (int col = 0; col < word_w; ++col) {
+                std::uint8_t lo = 0;
+                std::uint8_t hi = 0;
+                if (!SafeReadByte(at, &lo) || !SafeReadByte(at + 1, &hi)) {
+                    return 0;
+                }
+                at += 2;
+                if (lo != 0 || hi != 0) {
+                    any = true;
+                }
+                if (hash == 0) {
+                    hash = kOff;
+                }
+                hash ^= lo;
+                hash *= kPrime;
+                if (hash == 0) {
+                    hash = kOff;
+                }
+                hash ^= hi;
+                hash *= kPrime;
+            }
+        }
+        if (!any || hash == 0) {
+            return 0;
+        }
+        *key = hash;
+        return 1;
+    };
+
+    if (hash_buf(vram)) {
+        return 1;
+    }
+    void* vram1 = nullptr;
+    if (SafeReadPointer(ModuleBase() + 0x23F884u, &vram1) && vram1 && hash_buf(vram1)) {
+        return 1;
+    }
+    return 0;
+}
+
+extern "C" int ModReadPs1Vram(int which, void* dest, int dest_len) {
+    if (!dest || dest_len < 0x100000) {
+        return 0;
+    }
+    void* vram = nullptr;
+    const auto rva = which == 1 ? 0x23F884u : 0x23F880u;
+    if (!SafeReadPointer(ModuleBase() + rva, &vram) || !vram) {
+        return 0;
+    }
+    __try {
+        std::memcpy(dest, vram, 0x100000);
+        return 0x100000;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+}
+
+namespace {
+
+BOOL CALLBACK PickProcessWindow(HWND hwnd, LPARAM lp) {
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (pid != GetCurrentProcessId() || !IsWindowVisible(hwnd) || GetWindow(hwnd, GW_OWNER)) {
+        return TRUE;
+    }
+    *reinterpret_cast<HWND*>(lp) = hwnd;
+    return FALSE;
+}
+
+DWORD WINAPI ExitProcessSoon(LPVOID) {
+    Sleep(400);
+    ExitProcess(0);
+}
+
+}  // namespace
+
+extern "C" int ModQuit() {
+    grandia_mod::LogInfo("Game.Quit");
+    HWND wnd = nullptr;
+    EnumWindows(PickProcessWindow, reinterpret_cast<LPARAM>(&wnd));
+    if (wnd) {
+        PostMessageW(wnd, WM_CLOSE, 0, 0);
+    }
+    if (HANDLE thread = CreateThread(nullptr, 0, ExitProcessSoon, nullptr, 0, nullptr)) {
+        CloseHandle(thread);
+    } else {
+        ExitProcess(0);
+    }
+    return 1;
+}
+
 void FillHostApi(HostApiNative* api) {
     if (!api) {
         return;
@@ -436,11 +935,41 @@ void FillHostApi(HostApiNative* api) {
     api->overlay_panel_active = &ModOverlayPanelActive;
     api->party_walk_get = &ModPartyWalkGet;
     api->set_text1 = &ModSetText1;
+    api->menu_open = &ModMenuOpen;
+    api->menu_close = &ModMenuClose;
+    api->menu_is_open = &ModMenuIsOpen;
+    api->menu_cursor = &ModMenuCursor;
+    api->menu_take_choice = &ModMenuTakeChoice;
+    api->menu_take_cancel = &ModMenuTakeCancel;
+    api->menu_option = &ModMenuOption;
+    api->status_get = &ModGameStatus;
+    api->warp_to = &ModWarpTo;
+    api->overlay_input_open = &ModOverlayInputOpen;
+    api->overlay_input_close = &ModOverlayInputClose;
+    api->overlay_input_active = &ModOverlayInputActive;
+    api->overlay_input_text = &ModOverlayInputText;
+    api->overlay_input_take = &ModOverlayInputTake;
+    api->overlay_input_take_cancel = &ModOverlayInputTakeCancel;
+    api->sfx_emitter_count = &ModSfxEmitterCount;
+    api->sfx_emitter_range = &ModSfxEmitterRange;
+    api->sfx_emitter_get = &ModSfxEmitterGet;
+    api->sfx_emitter_move = &ModSfxEmitterMove;
+    api->sfx_emitter_mute = &ModSfxEmitterMute;
+    api->sfx_emitter_set_sfx = &ModSfxEmitterSetSfx;
+    api->sfx_emitter_add = &ModSfxEmitterAdd;
+    api->sfx_emitter_remove = &ModSfxEmitterRemove;
+    api->sfx_emitter_set_flags = &ModSfxEmitterSetFlags;
+    api->camera_walk_get = &ModCameraWalkGet;
+    api->hash_ps1_sprite = &ModHashPs1Sprite;
+    api->read_ps1_vram = &ModReadPs1Vram;
+    api->run_field = &ModRunField;
+    api->quit = &ModQuit;
+    api->xp_get = &ModXpGet;
+    api->xp_set = &ModXpSet;
 }
 
 bool InstallGameServices() {
     EnsureFlagBlob();
-    EnsureStashBase();
     InstallGoldPtrHook();
     return true;
 }

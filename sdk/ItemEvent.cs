@@ -18,12 +18,21 @@ public sealed class ItemEvent
     private bool _shortNameSet;
     private bool _descriptionSet;
 
+    public const int StatSlotCount = 3;
+
     public ItemEvent(int id, int cost, int icon, int useStatus)
     {
         Id = (Item)id;
         Cost = cost;
         Icon = icon;
         UseStatus = useStatus;
+        Stats =
+        [
+            new ItemStatBonus(this, 0),
+            new ItemStatBonus(this, 1),
+            new ItemStatBonus(this, 2),
+        ];
+        Auto = new ItemAutoEffect(this);
     }
 
     public Item Id { get; }
@@ -71,34 +80,66 @@ public sealed class ItemEvent
     /// <summary>u8 at record+7.</summary>
     public int Unknown7 { get; set; }
 
-    /// <summary>u8 at record+15 (ReDux para-1 before slash).</summary>
-    public int Para1Pre { get; set; }
-
-    /// <summary>u8 at record+16.</summary>
-    public int Para2 { get; set; }
-
-    /// <summary>u8 at record+17.</summary>
-    public int Para3 { get; set; }
-
-    /// <summary>u8 at record+18.</summary>
-    public int Para4 { get; set; }
-
-    /// <summary>u16 at record+19.</summary>
-    public int Para1Post { get; set; }
-
-    /// <summary>u16 at record+21.</summary>
-    public int Para2Post { get; set; }
-
-    /// <summary>u16 at record+23.</summary>
-    public int Para3Post { get; set; }
-
-    /// <summary>u16 at record+25.</summary>
-    public int Para4Post { get; set; }
+    /// <summary>
+    /// Three typed para lines (Wooden Sword Strength 7; Godspeed Wit 30).
+    /// Same bytes as <see cref="Para2"/>–<see cref="Para4"/> and the high
+    /// bytes of <see cref="Para1Post"/>–<see cref="Para3Post"/>.
+    /// </summary>
+    public ItemStatBonus[] Stats { get; }
 
     /// <summary>
-    /// u8 at record+8 (weapon class: 1 dagger … 6 bow; Lump of Coal is 0).
-    /// Seeded from the live row; assign to change. Unseeded 0 wipes class.
+    /// Auto Effect (on-hit proc, regen, counter). Same bytes as
+    /// <see cref="Unknown13"/> / <see cref="Unknown14"/> / <see cref="Para1Pre"/>.
     /// </summary>
+    public ItemAutoEffect Auto { get; }
+
+    /// <summary>
+    /// Weapon reach at record+25 (low byte of <see cref="Para4Post"/>).
+    /// Wooden Sword 1, Force Knife 10, Angel's Darts 16. Not the Telescope
+    /// bonus — that is <see cref="ItemStat.AttackRange"/> on <see cref="Stats"/>.
+    /// </summary>
+    public int AttackRange
+    {
+        get => Para4Post & 0xFF;
+        set => Para4Post = (Para4Post & ~0xFF) | (value & 0xFF);
+    }
+
+    /// <summary>
+    /// Weapon class at record+8. Same ids as <see cref="WeaponType"/>
+    /// (1 dagger … 6 bow). Key items are <see cref="WeaponType.None"/>.
+    /// Unseeded 0 wipes class.
+    /// </summary>
+    public WeaponType WeaponKind
+    {
+        get => (WeaponType)Unknown8;
+        set => Unknown8 = (int)value;
+    }
+
+    /// <summary>u8 at record+15 (sheet Auto Par2 / <see cref="Auto"/>.<see cref="ItemAutoEffect.Param"/>).</summary>
+    public int Para1Pre { get; set; }
+
+    /// <summary>u8 at record+16 (stat-1 kind / <see cref="Stats"/>[0].<see cref="ItemStatBonus.Kind"/>).</summary>
+    public int Para2 { get; set; }
+
+    /// <summary>u8 at record+17 (stat-2 kind).</summary>
+    public int Para3 { get; set; }
+
+    /// <summary>u8 at record+18 (stat-3 kind).</summary>
+    public int Para4 { get; set; }
+
+    /// <summary>u16 at record+19 (stat-1 value in the high byte).</summary>
+    public int Para1Post { get; set; }
+
+    /// <summary>u16 at record+21 (stat-2 value in the high byte).</summary>
+    public int Para2Post { get; set; }
+
+    /// <summary>u16 at record+23 (stat-3 value in the high byte).</summary>
+    public int Para3Post { get; set; }
+
+    /// <summary>u16 at record+25 (low = <see cref="AttackRange"/>, high = drop anime).</summary>
+    public int Para4Post { get; set; }
+
+    /// <summary>Same as <see cref="WeaponKind"/> (old name).</summary>
     public int Unknown8 { get; set; }
 
     /// <summary>u8 at record+11.</summary>
@@ -107,10 +148,10 @@ public sealed class ItemEvent
     /// <summary>u8 at record+12.</summary>
     public int Unknown12 { get; set; }
 
-    /// <summary>u8 at record+13.</summary>
+    /// <summary>u8 at record+13 (auto kind / <see cref="Auto"/>.<see cref="ItemAutoEffect.Kind"/>).</summary>
     public int Unknown13 { get; set; }
 
-    /// <summary>u8 at record+14.</summary>
+    /// <summary>u8 at record+14 (auto value / <see cref="Auto"/>.<see cref="ItemAutoEffect.Value"/>).</summary>
     public int Unknown14 { get; set; }
 
     /// <summary>u8 at record+27.</summary>
@@ -163,6 +204,48 @@ public sealed class ItemEvent
         _name = name ?? "";
         _shortName = shortName ?? "";
         _description = description ?? "";
+    }
+
+    internal int GetStatKind(int slot) => slot switch
+    {
+        0 => Para2,
+        1 => Para3,
+        2 => Para4,
+        _ => 0,
+    };
+
+    internal void SetStatKind(int slot, int kind)
+    {
+        switch (slot)
+        {
+            case 0: Para2 = kind; break;
+            case 1: Para3 = kind; break;
+            case 2: Para4 = kind; break;
+        }
+    }
+
+    internal int GetStatPacked(int slot) => slot switch
+    {
+        0 => Para1Post,
+        1 => Para2Post,
+        2 => Para3Post,
+        _ => 0,
+    };
+
+    internal void SetStatPacked(int slot, int packed)
+    {
+        switch (slot)
+        {
+            case 0: Para1Post = packed; break;
+            case 1: Para2Post = packed; break;
+            case 2: Para3Post = packed; break;
+        }
+    }
+
+    internal static int PackStatHigh(int packed, int value)
+    {
+        var raw = unchecked((byte)value);
+        return (packed & 0xFF) | (raw << 8);
     }
 
     /// <summary>Vanilla shop rule: <paramref name="cost"/>/2, or 1 if cost is 1.</summary>

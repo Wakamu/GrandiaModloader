@@ -5,6 +5,7 @@ namespace Grandia.Sdk;
 /// <see cref="Game.Turbo"/> / <see cref="Game.Encounters"/> / <see cref="Game.Debug"/>.
 /// Set <see cref="BlockGameInput"/> (or <see cref="Consume"/>) so this pad
 /// update is not applied to field / menus — use while an overlay panel is open.
+/// <see cref="GameOverlay.Prompt"/> blocks on its own until Enter / Escape.
 /// </summary>
 public sealed class TickEvent
 {

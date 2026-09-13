@@ -13,6 +13,13 @@ public sealed class Map
         Stem = id.ToString();
         Hooks = new HookTable();
         Zones = new ZoneTable();
+        Sfx = new MapSfxTable();
+        Npcs = new MapNpcTable();
+        Anims = new MapAnimTable();
+        SpriteClips = new MapSpriteClipTable();
+        Poses = new MapSpritePoseTable();
+        Sprites = new MapSpriteBank();
+        Textures = new MapTextureTable();
     }
 
     public Map(string stem)
@@ -21,6 +28,13 @@ public sealed class Map
         Id = MapId.Parse(Stem);
         Hooks = new HookTable();
         Zones = new ZoneTable();
+        Sfx = new MapSfxTable();
+        Npcs = new MapNpcTable();
+        Anims = new MapAnimTable();
+        SpriteClips = new MapSpriteClipTable();
+        Poses = new MapSpritePoseTable();
+        Sprites = new MapSpriteBank();
+        Textures = new MapTextureTable();
     }
 
     public MapId Id { get; }
@@ -30,6 +44,74 @@ public sealed class Map
     public HookTable Hooks { get; }
 
     public ZoneTable Zones { get; }
+
+    /// <summary>
+    /// Positional field SFX from MDP sec[29] (river, frogs, town beds).
+    /// Same lazy fopen hydrate as <see cref="Zones"/>. Live mixer poke is
+    /// <see cref="Game.FieldSfx"/> after field setup.
+    /// </summary>
+    public MapSfxTable Sfx { get; }
+
+    /// <summary>
+    /// Town talkers from MDP sec[8] (kind 0 stands, kind 4 walks, talk ≠ 0). Same lazy
+    /// fopen hydrate as <see cref="Zones"/>. Kind-2 wanderers stay on
+    /// <see cref="Encounters"/>. Mutate / <see cref="AddNpc"/> /
+    /// <see cref="MapNpc.Remove"/> recopies the 4 KiB instance heap after
+    /// the field-setup word-copy. Add clones an existing talker's CLUT /
+    /// flags — it does not graft a new hdr+4 body.
+    /// </summary>
+    public MapNpcTable Npcs { get; }
+
+    /// <summary>
+    /// This map's sec[21] clip directory (id + streams / frames / cues).
+    /// Same lazy fopen hydrate as <see cref="Zones"/>. Play with
+    /// <c>anim {id} talk={TalkId} mode=2</c>. Ids missing here are the shared
+    /// bank, not NPC data. Dirty rows are emitted and swapped onto
+    /// <c>[0x71CAE0]</c> after bind.
+    /// </summary>
+    public MapAnimTable Anims { get; }
+
+    /// <summary>
+    /// This map's sec[23] sprite-clip directory (id + timed pose frames).
+    /// Same lazy fopen hydrate as <see cref="Zones"/>. Play with
+    /// <c>unit_bind {id} {talkId}</c> (field_talk; x is the clip id, not a
+    /// bone). Not <see cref="Anims"/> (sec[21] xyz polylines). Read-only —
+    /// does not mark the map dirty. Maps with no sec[23] (or wrong magic)
+    /// hydrate empty.
+    /// </summary>
+    public MapSpriteClipTable SpriteClips { get; }
+
+    /// <summary>
+    /// This map's sec[23] pose directory. Indexer is the pose index a
+    /// <see cref="MapSpriteClipFrame.Pose"/> names. Each pose is a list of
+    /// 16-byte parts (channel + sprite cookie). Read-only.
+    /// </summary>
+    public MapSpritePoseTable Poses { get; }
+
+    /// <summary>
+    /// SoftHD spriteinfo catalogs plus sec[32] UV cells
+    /// (<see cref="MapSpriteBank.Anim"/> / <see cref="MapSpriteBank.Tenants"/> /
+    /// <see cref="MapSpriteBank.Maps"/> / <see cref="MapSpriteBank.MapEff"/>).
+    /// This is the HD atlas table, not the PS1 TIM. Original texels are
+    /// <see cref="Textures"/>. Same lazy fopen hydrate as <see cref="Zones"/>.
+    /// Read-only.
+    /// </summary>
+    public MapSpriteBank Sprites { get; }
+
+    /// <summary>
+    /// Original PS1 field TIM (sec[1] + sec[27], rare sec[16]) decoded
+    /// into a 1024×512 word sheet. Crop a pose part or sec[32] UV with
+    /// <see cref="MapTextureTable.TryCrop(MapSpritePart, out MapTextureCrop)"/>.
+    /// Same lazy fopen hydrate as <see cref="Zones"/>. Read-only.
+    /// </summary>
+    public MapTextureTable Textures { get; }
+
+    /// <summary>
+    /// HD sprite → original TIM crop. v4 uses <see cref="MapSprite.Source"/>;
+    /// anim hashes <see cref="MapSpriteBank.Uv"/> against <see cref="MapSprite.Key"/>.
+    /// </summary>
+    public bool TryCrop(MapSprite sprite, out MapTextureCrop crop) =>
+        Textures.TryCrop(sprite, Sprites.Uv, out crop);
 
     /// <summary>
     /// Fights on this map: sec[7] handler 0x19 (<c>scripted_battle</c>) and
@@ -66,7 +148,7 @@ public sealed class Map
     }
 
     public bool Dirty =>
-        _scripts.Values.Any(s => s.Dirty) || Hooks.Dirty || Zones.Dirty;
+        _scripts.Values.Any(s => s.Dirty) || Hooks.Dirty || Zones.Dirty || Sfx.Dirty || Npcs.Dirty || Anims.Dirty;
 
     public Script GetScript(int id)
     {
@@ -188,6 +270,46 @@ public sealed class Map
 
     public void RemoveZone(int index) => Zones.RemoveAt(index);
 
+    /// <summary>
+    /// Append a sec[29] emitter. Heap copy holds at most
+    /// <see cref="MdpSec29.MaxLive"/> live rows.
+    /// </summary>
+    public MapSfx AddSfx(int sfx, int x, int y, int z, bool looping = true) =>
+        Sfx.Add(sfx, x, y, z, looping);
+
+    public MapSfx AddSfx(int sfx, WalkPos pos, bool looping = true) =>
+        AddSfx(sfx, pos.X, pos.Y, pos.Z, looping);
+
+    public void RemoveSfx(MapSfx row) => row.Remove();
+
+    public void RemoveSfx(int index) => Sfx.RemoveAt(index);
+
+    /// <summary>
+    /// Append a town talker. Reuse a talk id that already has a body mesh;
+    /// a new id without hdr+4 <c>100+(talk−1)</c> will not draw a townsfolk.
+    /// Heap copy holds at most <see cref="MdpSec8.MaxLive"/> live rows.
+    /// </summary>
+    public MapNpc AddNpc(int talk, int x, int y, int z) =>
+        Npcs.Add(talk, x, y, z);
+
+    public MapNpc AddNpc(int talk, WalkPos pos) =>
+        AddNpc(talk, pos.X, pos.Y, pos.Z);
+
+    public void RemoveNpc(MapNpc row) => row.Remove();
+
+    public void RemoveNpc(int index) => Npcs.RemoveAt(index);
+
+    /// <summary>
+    /// Append a sec[21] clip. Play with
+    /// <c>anim {id} talk={TalkId} mode=2</c>. Shared-bank ids stay omitted
+    /// until added here.
+    /// </summary>
+    public MapAnim AddAnim(int id) => Anims.Add(id);
+
+    public void RemoveAnim(MapAnim row) => row.Remove();
+
+    public void RemoveAnim(int index) => Anims.RemoveAt(index);
+
     /// <summary>Replace an existing table-2 row by id.</summary>
     public Hook ReplaceHook(int id, string line)
     {
@@ -234,6 +356,44 @@ public sealed class Map
             {
                 sb.AppendLine(hook.Append ? "add" : $"replace id={hook.Id}");
                 sb.AppendLine(hook.Line);
+            }
+
+            sb.AppendLine("}");
+            sb.AppendLine();
+        }
+
+        if (Sfx.Dirty)
+        {
+            sb.AppendLine("sfx {");
+            sb.Append("  range ").Append(Sfx.Range).AppendLine();
+            foreach (var row in Sfx.Items.Where(e => e.Dirty && !e.Removed))
+            {
+                sb.Append(row.Append ? "  add" : "  replace");
+                sb.Append(" id=").Append(row.Id);
+                sb.Append(" sfx=").Append(row.Sfx);
+                sb.Append(" flags=0x").Append(row.Flags.ToString("X"));
+                sb.Append(" x=").Append(row.X);
+                sb.Append(" y=").Append(row.Y);
+                sb.Append(" z=").Append(row.Z);
+                sb.AppendLine();
+            }
+
+            sb.AppendLine("}");
+            sb.AppendLine();
+        }
+
+        if (Npcs.Dirty)
+        {
+            sb.AppendLine("npcs {");
+            foreach (var row in Npcs.Items.Where(e => e.Dirty && !e.Removed))
+            {
+                sb.Append(row.Append ? "  add" : "  replace");
+                sb.Append(" talk=").Append(row.TalkId);
+                sb.Append(" kind=").Append(row.Kind);
+                sb.Append(" x=").Append(row.X);
+                sb.Append(" y=").Append(row.Y);
+                sb.Append(" z=").Append(row.Z);
+                sb.AppendLine();
             }
 
             sb.AppendLine("}");

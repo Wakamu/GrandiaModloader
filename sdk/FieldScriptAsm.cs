@@ -6,6 +6,7 @@ namespace Grandia.Sdk;
 
 /// <summary>
 /// In-process field-script assembler (same mnemonics as <c>field_tools script</c>).
+/// Dump lifts vanilla gates to <c>if … { }</c> / <c>menu { }</c> like the Python tool.
 /// Unmodified scripts are never assembled — encode only after a write.
 /// </summary>
 public static class FieldScriptAsm
@@ -50,14 +51,12 @@ public static class FieldScriptAsm
     {
         var ops = FieldScriptIr.Parse(bytecode, 0, bytecode.Length);
         var labels = new HashSet<string>(ops.OfType<FsLabel>().Select(l => l.Name), StringComparer.Ordinal);
+        var referenced = ReferencedLabels(ops);
         var sb = new StringBuilder();
         sb.Append("script 0x").Append(scriptId.ToString("X4", CultureInfo.InvariantCulture)).AppendLine();
-        foreach (var item in ops)
+        foreach (var line in FormatOps(ops, referenced, labels, mapStem))
         {
-            foreach (var line in FormatItem(item, labels, mapStem))
-            {
-                sb.AppendLine(line);
-            }
+            sb.AppendLine(line);
         }
 
         return sb.ToString();
@@ -134,8 +133,7 @@ public static class FieldScriptAsm
                              $" 0x{f.FlagId:X4}" + WordClause(f.Word, (f.Word & 0xF) != 0 ? FlagSet : FlagClear);
                 break;
             case FsJump j:
-                var skip = labels.Contains(j.Target) ? "" : $" skip=0x{j.OriginalSkip:X}";
-                yield return $"jump {j.Target}{skip}{WordClause(j.Word & 0xF000, JumpHi)}";
+                yield return FormatJump(j, labels);
                 break;
             case FsRelJump r:
                 var rel = labels.Contains(r.Target) ? "" : $" rel={r.OriginalRel}";
@@ -161,6 +159,357 @@ public static class FieldScriptAsm
                 yield return $"raw hex=";
                 break;
         }
+    }
+
+    private static List<string> FormatOps(
+        IReadOnlyList<FsItem> ops, HashSet<string> referenced, HashSet<string> labels, string? mapStem)
+    {
+        var lines = new List<string>();
+        var i = 0;
+        while (i < ops.Count)
+        {
+            if (TryMatchMenu(ops, i, referenced, out var menuAfter, out var say, out var rungs))
+            {
+                lines.Add("menu {");
+                lines.AddRange(IndentRows(FormatSay(say, mapStem), 2));
+                foreach (var (rungPick, jump, body) in rungs)
+                {
+                    lines.Add("  " + FormatPickHeader(rungPick, jump, labels));
+                    lines.AddRange(IndentRows(FormatOps(body, referenced, labels, mapStem), 4));
+                }
+
+                lines.Add("}");
+                i = menuAfter;
+                continue;
+            }
+
+            if (TryMatchIfBody(ops, i, referenced, out var ifAfter, out var skips, out var ifJump, out var ifBody))
+            {
+                lines.Add(FormatIfHeader(skips, ifJump, labels));
+                lines.AddRange(IndentRows(FormatOps(ifBody, referenced, labels, mapStem), 2));
+                lines.Add("}");
+                i = ifAfter;
+                continue;
+            }
+
+            if (TryMatchIfGate(ops, i, referenced, out var gateAfter, out var gateSkips, out var gateJump))
+            {
+                lines.Add("if " + string.Join(" and ", gateSkips.Select(FormatIfCond)));
+                lines.Add("  " + FormatJump(gateJump, labels));
+                i = gateAfter;
+                continue;
+            }
+
+            if (TryMatchPickGate(ops, i, referenced, out var pickAfter, out var pick, out var pickJump))
+            {
+                lines.Add($"if pick == {pick}");
+                lines.Add("  " + FormatJump(pickJump, labels));
+                i = pickAfter;
+                continue;
+            }
+
+            lines.AddRange(FormatItem(ops[i], labels, mapStem));
+            i += 1;
+        }
+
+        return lines;
+    }
+
+    private static bool TryMatchIfGate(
+        IReadOnlyList<FsItem> ops, int i, HashSet<string> referenced,
+        out int after, out List<FsBranch> skips, out FsJump jump)
+    {
+        after = i;
+        skips = [];
+        jump = null!;
+        if (i >= ops.Count || !IsModeBegin(ops[i]))
+        {
+            return false;
+        }
+
+        var j = i + 1;
+        while (j < ops.Count)
+        {
+            while (j < ops.Count && ops[j] is FsLabel lab)
+            {
+                if (referenced.Contains(lab.Name))
+                {
+                    return false;
+                }
+
+                j += 1;
+            }
+
+            if (j < ops.Count && ops[j] is FsBranch br && GateSkipKind(br) is not null)
+            {
+                skips.Add(br);
+                j += 1;
+                continue;
+            }
+
+            break;
+        }
+
+        if (skips.Count == 0)
+        {
+            return false;
+        }
+
+        while (j < ops.Count && ops[j] is FsLabel mid)
+        {
+            if (referenced.Contains(mid.Name))
+            {
+                return false;
+            }
+
+            j += 1;
+        }
+
+        if (j >= ops.Count || !IsModeEnd(ops[j]))
+        {
+            return false;
+        }
+
+        j += 1;
+        if (j >= ops.Count || ops[j] is not FsJump jmp)
+        {
+            return false;
+        }
+
+        after = j + 1;
+        jump = jmp;
+        return true;
+    }
+
+    private static bool TryMatchIfBody(
+        IReadOnlyList<FsItem> ops, int i, HashSet<string> referenced,
+        out int after, out List<FsBranch> skips, out FsJump jump, out List<FsItem> body)
+    {
+        after = i;
+        skips = [];
+        jump = null!;
+        body = [];
+        if (!TryMatchIfGate(ops, i, referenced, out var gateAfter, out skips, out jump))
+        {
+            return false;
+        }
+
+        var tgt = LabelIndex(ops, jump.Target);
+        if (tgt < 0 || tgt < gateAfter)
+        {
+            return false;
+        }
+
+        if (ops[tgt] is not FsLabel lab || lab.Name != jump.Target)
+        {
+            return false;
+        }
+
+        after = tgt + 1;
+        body = ops.Skip(gateAfter).Take(tgt - gateAfter).ToList();
+        return true;
+    }
+
+    private static bool TryMatchPickGate(
+        IReadOnlyList<FsItem> ops, int i, HashSet<string> referenced,
+        out int after, out int pick, out FsJump jump)
+    {
+        after = i;
+        pick = 0;
+        jump = null!;
+        if (i >= ops.Count || !IsModeBegin(ops[i]))
+        {
+            return false;
+        }
+
+        var j = i + 1;
+        while (j < ops.Count && ops[j] is FsLabel skipLab)
+        {
+            if (referenced.Contains(skipLab.Name))
+            {
+                return false;
+            }
+
+            j += 1;
+        }
+
+        if (j >= ops.Count || ops[j] is not FsBranch br || !IsChoiceRung(br))
+        {
+            return false;
+        }
+
+        pick = br.Extra[0] | (br.Extra[1] << 8);
+        j += 1;
+        while (j < ops.Count && ops[j] is FsLabel mid)
+        {
+            if (referenced.Contains(mid.Name))
+            {
+                return false;
+            }
+
+            j += 1;
+        }
+
+        if (j >= ops.Count || !IsModeEnd(ops[j]))
+        {
+            return false;
+        }
+
+        j += 1;
+        if (j >= ops.Count || ops[j] is not FsJump jmp)
+        {
+            return false;
+        }
+
+        after = j + 1;
+        jump = jmp;
+        return true;
+    }
+
+    private static bool TryMatchMenu(
+        IReadOnlyList<FsItem> ops, int i, HashSet<string> referenced,
+        out int after, out FsSay say, out List<(int Pick, FsJump Jump, List<FsItem> Body)> rungs)
+    {
+        after = i;
+        say = null!;
+        rungs = [];
+        if (i >= ops.Count || ops[i] is not FsSay dialog || !IsDialogMenu(dialog))
+        {
+            return false;
+        }
+
+        say = dialog;
+        var j = i + 1;
+        while (j < ops.Count && ops[j] is FsLabel lead)
+        {
+            if (referenced.Contains(lead.Name))
+            {
+                return false;
+            }
+
+            j += 1;
+        }
+
+        while (true)
+        {
+            if (!TryMatchPickGate(ops, j, referenced, out var gateAfter, out var pick, out var jump))
+            {
+                break;
+            }
+
+            var tgt = LabelIndex(ops, jump.Target);
+            if (tgt < 0 || tgt < gateAfter)
+            {
+                return false;
+            }
+
+            if (ops[tgt] is not FsLabel lab || lab.Name != jump.Target)
+            {
+                return false;
+            }
+
+            rungs.Add((pick, jump, ops.Skip(gateAfter).Take(tgt - gateAfter).ToList()));
+            j = tgt + 1;
+            while (j < ops.Count && ops[j] is FsLabel extra && !referenced.Contains(extra.Name))
+            {
+                j += 1;
+            }
+        }
+
+        if (rungs.Count == 0)
+        {
+            return false;
+        }
+
+        after = j;
+        return true;
+    }
+
+    private static HashSet<string> ReferencedLabels(IEnumerable<FsItem> ops)
+    {
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var item in ops)
+        {
+            switch (item)
+            {
+                case FsJump j:
+                    names.Add(j.Target);
+                    break;
+                case FsRelJump r:
+                    names.Add(r.Target);
+                    break;
+            }
+        }
+
+        return names;
+    }
+
+    private static int LabelIndex(IReadOnlyList<FsItem> ops, string name)
+    {
+        for (var i = 0; i < ops.Count; i++)
+        {
+            if (ops[i] is FsLabel lab && lab.Name == name)
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
+    private static bool IsModeBegin(FsItem item) => item is FsWord w && w.Word == ModeBegin;
+
+    private static bool IsModeEnd(FsItem item) => item is FsWord w && w.Word == ModeEnd;
+
+    private static bool IsChoiceRung(FsBranch op) =>
+        op.Word == ChoiceWord && op.Arg == ChoiceArg && op.Extra.Length == 2;
+
+    private static bool IsDialogMenu(FsSay op) =>
+        DialogueMarkup.HasMenuControl(DialogueTokens.Tokenize(op.Payload));
+
+    private static string? GateSkipKind(FsBranch op)
+    {
+        if (op.Extra.Length != 0)
+        {
+            return null;
+        }
+
+        if (op.Word == BranchClear)
+        {
+            return "clear";
+        }
+
+        if (op.Word is BranchSet or BranchSetAlt)
+        {
+            return "set";
+        }
+
+        return null;
+    }
+
+    private static string FormatIfCond(FsBranch op)
+    {
+        var kind = GateSkipKind(op) ?? "set";
+        var def = kind == "clear" ? BranchClear : BranchSet;
+        return $"{kind} 0x{op.Arg:X4}{WordClause(op.Word, def)}";
+    }
+
+    private static string FormatIfHeader(IReadOnlyList<FsBranch> skips, FsJump jump, HashSet<string> labels) =>
+        $"if {string.Join(" and ", skips.Select(FormatIfCond))} -> {jump.Target}{SkipClause(jump, labels)}{WordClause(jump.Word & 0xF000, JumpHi)} {{";
+
+    private static string FormatPickHeader(int pick, FsJump jump, HashSet<string> labels) =>
+        $"pick {pick} -> {jump.Target}{SkipClause(jump, labels)}{WordClause(jump.Word & 0xF000, JumpHi)}";
+
+    private static string FormatJump(FsJump j, HashSet<string> labels) =>
+        $"jump {j.Target}{SkipClause(j, labels)}{WordClause(j.Word & 0xF000, JumpHi)}";
+
+    private static string SkipClause(FsJump j, HashSet<string> labels) =>
+        labels.Contains(j.Target) ? "" : $" skip=0x{j.OriginalSkip:X}";
+
+    private static List<string> IndentRows(IEnumerable<string> rows, int n)
+    {
+        var pad = new string(' ', n);
+        return rows.Select(row => row.Length == 0 ? row : pad + row).ToList();
     }
 
     private static string FormatBranch(FsBranch op)

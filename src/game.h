@@ -32,6 +32,39 @@ struct HostApiNative {
     int(__cdecl* overlay_panel_active)();
     int(__cdecl* party_walk_get)(int* x, int* y, int* z);
     int(__cdecl* set_text1)(const void* data, int len);
+    int(__cdecl* menu_open)(const char* title, const char* joined, int count);
+    int(__cdecl* menu_close)();
+    int(__cdecl* menu_is_open)();
+    int(__cdecl* menu_cursor)();
+    int(__cdecl* menu_take_choice)();
+    int(__cdecl* menu_take_cancel)();
+    int(__cdecl* menu_option)();
+    int(__cdecl* status_get)();
+    int(__cdecl* warp_to)(int dest, int spawn, int aux9, int auxA);
+    int(__cdecl* overlay_input_open)(const char* title, const char* initial, int max_len);
+    int(__cdecl* overlay_input_close)();
+    int(__cdecl* overlay_input_active)();
+    const char*(__cdecl* overlay_input_text)();
+    const char*(__cdecl* overlay_input_take)();
+    int(__cdecl* overlay_input_take_cancel)();
+    int(__cdecl* sfx_emitter_count)();
+    int(__cdecl* sfx_emitter_range)();
+    int(__cdecl* sfx_emitter_get)(int index, int* rec_id, int* sfx, int* flags, int* x, int* y,
+                                  int* z, int* muted);
+    int(__cdecl* sfx_emitter_move)(int index, int x, int y, int z);
+    int(__cdecl* sfx_emitter_mute)(int index, int muted);
+    int(__cdecl* sfx_emitter_set_sfx)(int index, int sfx);
+    int(__cdecl* sfx_emitter_add)(int rec_id, int sfx, int flags, int x, int y, int z, int kind,
+                                 int period, int bias);
+    int(__cdecl* sfx_emitter_remove)(int index);
+    int(__cdecl* sfx_emitter_set_flags)(int index, int flags);
+    int(__cdecl* camera_walk_get)(int* x, int* y, int* z);
+    int(__cdecl* hash_ps1_sprite)(int tpage, int u, int v, int width, int height, unsigned* key);
+    int(__cdecl* read_ps1_vram)(int which, void* dest, int dest_len);
+    int(__cdecl* run_field)(int kind, int id, int table, const void* bytes, int len);
+    int(__cdecl* quit)();
+    int(__cdecl* xp_get)(int kind);
+    int(__cdecl* xp_set)(int kind, int multiplier);
 };
 
 bool InstallGameServices();
@@ -39,5 +72,6 @@ void RemoveGameServices();
 void FillHostApi(HostApiNative* api);
 void AdoptGoldBase(std::uintptr_t gold_ptr);
 void AdoptFlagBlob(std::uintptr_t blob);
+void ResetLiveSavePointers();
 
 }  // namespace grandia_mod

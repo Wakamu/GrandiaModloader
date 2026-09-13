@@ -14,7 +14,8 @@ Tokens:
   [P:expr slot=0x21]        same, header b1: 0x03 left, 0x12 center, 0x21 right
   [P:off] / [P:off slot=]   extra 0x00 — hide that still slot, not face 0
   [P:keep] / [P:keep slot=] accepted on parse (legacy); no extra is [P:0] or idle [P:1]
-  ♥                        mid-line glyph (RawByte 0xD7)
+  ♥ ♪ ○ 〜 ー             Latin codefont extras (RawByte). ♥=D7 ♪=D9
+                            ○=D8 ♫=DA. 0x80–9F are katakana (Gaia speech).
   [voice:play id=0x5aa]     start voice catalog id on channel 0
   [voice:play ch=2 id=0x2d] same on channel 2 (0..2)
   [voice:stop]              stop channel 0
@@ -43,8 +44,13 @@ Tokens:
                             only while the live box is bottom; no-op on top.
                             does not clear portraits — [P:off] a slot to hide it
   [/overlay]                close the overlay (Control 09 02); base box stays
-  [raw:0a00c0]              verbatim stream bytes that have no mnemonic (signpost
-                            packets, leftover pads). Not a displayed glyph.
+  [color:yellow]…[color]    inline 0A 00 C0 … 0A 00 F0 (yellow, then white).
+                            Third byte is (fg<<4)|bg into a 16-color palette.
+                            [color:yellow:black] is C1 (letter fill).
+                            [color] / [/color] / [color:white] emit F0.
+                            [color:grey] is D0 (signpost body). Vanilla stores
+                            C0 / D0.
+  [raw:ff]                  leftover verbatim bytes with no mnemonic. Not a glyph.
   [line]                    LineStart (09 01). Type-1 leftover 09 01 still
                             disables confirm; an editor conversion that wants
                             [wait] should drop [line], and apply then strips
@@ -217,6 +223,12 @@ class RawBytesEvent:
 
 
 @dataclass(frozen=True)
+class ColorEvent:
+    """Inline 0A 00 XX color. XX is (fg<<4)|bg in the 16-color printer palette."""
+    code: int
+
+
+@dataclass(frozen=True)
 class LineEvent:
     """LineStart (09 01)."""
     pass
@@ -262,6 +274,7 @@ MarkupEvent = (
     | MenuEvent
     | FaceKeyEvent
     | RawBytesEvent
+    | ColorEvent
     | LineEvent
     | Ctrl09Event
     | EndEvent
@@ -283,7 +296,20 @@ _STILL_SLOTS = {0x03, 0x12, 0x21}
 _STILL_HEADER = (0x0A, 0x0C)
 _CTRL09_ARG_SUBS = {0x0A, 0x0B, 0x0C, 0x0D, 0x0E}
 # Grandia English font extras that sit in the text stream, not as [P:] / controls.
-_TEXT_GLYPHS = {0xD7: "♥"}
+# Latin HD codefont extras. Stream byte = SPRIV footer key (not atlas index).
+# 0x80–0x9F katakana (Gaia babble). D7–DA symbols. Controls 00–1F are not glyphs.
+_LATIN_KANA_80 = "ァィゥェォャュョッアカガキギクグケゲコゴサザシジスズセゼソゾタダ"
+_TEXT_GLYPHS = {0x80 + i: ch for i, ch in enumerate(_LATIN_KANA_80)}
+_TEXT_GLYPHS.update(
+    {
+        0xD5: "ー",
+        0xD6: "〜",
+        0xD7: "♥",
+        0xD8: "○",
+        0xD9: "♪",
+        0xDA: "♫",
+    }
+)
 _TEXT_GLYPH_BYTES = {ch: byte for byte, ch in _TEXT_GLYPHS.items()}
 
 _TOKEN_RE = re.compile(
@@ -301,6 +327,9 @@ _TOKEN_RE = re.compile(
     r"\[menu\]|"
     r"\[overlay\]|"
     r"\[/overlay\]|"
+    r"\[color(?::[^\]]+)?\]|"
+    r"\[/color\]|"
+    r"\[yellow\]|"
     r"\[raw:[0-9a-fA-F]+\]|"
     r"\[line\]|"
     r"\[09:[0-9A-Fa-f]{1,2}(?::(?:0x[0-9A-Fa-f]+|\d+))?\]|"
@@ -320,7 +349,54 @@ _CTRL09_RE = re.compile(
     r"\[09:([0-9A-Fa-f]{1,2})(?::(0x[0-9A-Fa-f]+|\d+))?\]"
 )
 _END_RE = re.compile(r"\[end(?::([0-9a-fA-F]*))?\]")
-_HDR_RE = re.compile(r"\[hdr:([0-9a-fA-F]+)\]")
+_HDR_RE = re.compile(r"\[hdr:([0-9A-Fa-f]+)\]")
+_COLOR_RE = re.compile(
+    r"\[(?:/color|yellow|color(?::([^\]]+))?)\]",
+    re.IGNORECASE,
+)
+COLOR_YELLOW = 0xC0
+COLOR_GREY = 0xD0
+COLOR_WHITE = 0xF0
+COLOR_NIBBLE_NAMES = (
+    "transparent",
+    "black",
+    "red",
+    "pink",
+    "turquoise",
+    "asparagus",
+    "argent",
+    "bright",
+    "purple",
+    "green",
+    "darkred",
+    "dim",
+    "yellow",
+    "grey",
+    "blue",
+    "white",
+)
+_COLOR_NIBBLE_ALIASES = {
+    name: i for i, name in enumerate(COLOR_NIBBLE_NAMES)
+}
+_COLOR_NIBBLE_ALIASES.update({f"{i:X}": i for i in range(16)})
+_COLOR_NIBBLE_ALIASES.update({f"{i:x}": i for i in range(16)})
+_COLOR_NIBBLE_ALIASES.update(
+    {
+        "none": 0,
+        "clear": 0,
+        "magenta": 3,
+        "teal": 4,
+        "olive": 5,
+        "silver": 6,
+        "maroon": 10,
+        "dark-red": 10,
+        "darkgrey": 11,
+        "darkgray": 11,
+        "charcoal": 11,
+        "gray": 13,
+        "default": 15,
+    }
+)
 
 
 def normalize_markup(text: str) -> str:
@@ -456,6 +532,8 @@ def parse_markup(text: str) -> list[MarkupEvent]:
             if len(hx) % 2:
                 raise ValueError(f"odd [raw:] hex length: {tok!r}")
             events.append(RawBytesEvent(data=bytes.fromhex(hx)))
+        elif tok.lower().startswith("[color") or tok.lower() in ("[/color]", "[yellow]"):
+            events.append(ColorEvent(code=_parse_color(tok)))
         else:
             pm = _P_RE.fullmatch(tok)
             if not pm:
@@ -852,9 +930,74 @@ def _is_named_stream_raw(tokens: list[DToken], i: int) -> bool:
     val = tokens[i].value
     if val in _TEXT_GLYPHS:
         return True
+    if _color_packet(tokens, i) is not None:
+        return True
     if is_stream_menu(tokens, i) or _is_overlay_open(tokens, i) or _is_exclusive_swap(tokens, i):
         return True
     return _raw_belongs_to_header(tokens, i)
+
+
+def _color_packet(tokens: list[DToken], i: int) -> int | None:
+    if i + 2 >= len(tokens):
+        return None
+    a, b, c = tokens[i], tokens[i + 1], tokens[i + 2]
+    if (
+        isinstance(a, RawByteToken)
+        and a.value == 0x0A
+        and isinstance(b, RawByteToken)
+        and b.value == 0x00
+        and isinstance(c, RawByteToken)
+    ):
+        return c.value
+    return None
+
+
+def _format_color(code: int) -> str:
+    code &= 0xFF
+    if code == COLOR_WHITE:
+        return "[color]"
+    fg = (code >> 4) & 0xF
+    bg = code & 0xF
+    fg_name = COLOR_NIBBLE_NAMES[fg]
+    if bg == 0:
+        return f"[color:{fg_name}]"
+    return f"[color:{fg_name}:{COLOR_NIBBLE_NAMES[bg]}]"
+
+
+def _parse_color(tok: str) -> int:
+    m = _COLOR_RE.fullmatch(tok)
+    if not m:
+        raise ValueError(f"Unknown markup token {tok!r}")
+    spec = m.group(1)
+    if spec is None:
+        return COLOR_YELLOW if tok.lower() == "[yellow]" else COLOR_WHITE
+    return _parse_color_spec(spec)
+
+
+def _parse_color_nibble(raw: str) -> int:
+    key = raw.strip()
+    if key.lower() in _COLOR_NIBBLE_ALIASES:
+        return _COLOR_NIBBLE_ALIASES[key.lower()]
+    if len(key) == 1 and key in _COLOR_NIBBLE_ALIASES:
+        return _COLOR_NIBBLE_ALIASES[key]
+    raise ValueError(f"Unknown color nibble {raw!r}")
+
+
+def _parse_color_spec(spec: str) -> int:
+    raw = spec.strip()
+    if raw.lower().startswith("0x"):
+        return parse_slot_value(raw) & 0xFF
+    if ":" in raw:
+        fg_s, bg_s = raw.split(":", 1)
+        return (_parse_color_nibble(fg_s) << 4) | _parse_color_nibble(bg_s)
+    key = raw.lower()
+    if key in _COLOR_NIBBLE_ALIASES:
+        return _COLOR_NIBBLE_ALIASES[key] << 4
+    if len(raw) == 2 and all(c in "0123456789abcdefABCDEF" for c in raw):
+        return int(raw, 16) & 0xFF
+    if raw.isdigit():
+        return int(raw, 10) & 0xFF
+    raise ValueError(f"Unknown color {spec!r}")
 
 
 def is_stream_menu(tokens: list[DToken], i: int) -> bool:
@@ -968,6 +1111,7 @@ def _still_wants_face_extra(events: list[MarkupEvent], start: int) -> bool:
                 DelayEvent,
                 WaitEvent,
                 BoxEvent,
+                ColorEvent,
             ),
         ):
             continue
@@ -1223,6 +1367,11 @@ def tokens_to_markup(
                 continue
             if _raw_belongs_to_header(tokens, i):
                 i += 1
+                continue
+            color = _color_packet(tokens, i)
+            if color is not None:
+                out.append(_format_color(color))
+                i += 3
                 continue
             buf: list[int] = []
             while i < n and isinstance(tokens[i], RawByteToken) and not _is_named_stream_raw(tokens, i):
@@ -1632,6 +1781,13 @@ def apply_markup(
         if isinstance(ev, EndEvent):
             end_pad = ev.pad
             continue
+        if isinstance(ev, ColorEvent):
+            flush_swap()
+            flush_pending_overlay()
+            out.append(RawByteToken(0x0A))
+            out.append(RawByteToken(0x00))
+            out.append(RawByteToken(int(ev.code) & 0xFF))
+            continue
         if isinstance(ev, RawBytesEvent):
             flush_swap()
             flush_pending_overlay()
@@ -1811,7 +1967,7 @@ def first_spoken_line(markup: str) -> str:
             parts.append(ev.text)
         elif isinstance(ev, NewlineEvent):
             break
-        elif isinstance(ev, (ClearEvent, WaitEvent, DelayEvent, OverlayEvent, OverlayEndEvent, SlotOffEvent, KeepPortraitEvent, BoxEvent, Ctrl0BEvent, SwapEvent, MenuEvent, FaceKeyEvent, RawBytesEvent, LineEvent, Ctrl09Event, EndEvent, HdrEvent)):
+        elif isinstance(ev, (ClearEvent, WaitEvent, DelayEvent, OverlayEvent, OverlayEndEvent, SlotOffEvent, KeepPortraitEvent, BoxEvent, Ctrl0BEvent, SwapEvent, MenuEvent, FaceKeyEvent, RawBytesEvent, ColorEvent, LineEvent, Ctrl09Event, EndEvent, HdrEvent)):
             if parts:
                 break
     return "".join(parts).strip()

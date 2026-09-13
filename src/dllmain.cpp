@@ -12,7 +12,7 @@ namespace {
 
 DWORD WINAPI MainThread(LPVOID) {
     __try {
-        grandia_mod::LogInfo("MainThread started (pid=%lu)", GetCurrentProcessId());
+
         if (!grandia_mod::InstallOverlayHooks()) {
             grandia_mod::LogWarn("fopen / map-apply hooks not installed");
         }
@@ -47,7 +47,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
         case DLL_PROCESS_ATTACH:
             DisableThreadLibraryCalls(module);
             grandia_mod::InitializeLogging();
-            grandia_mod::LogInfo("DllMain PROCESS_ATTACH (module=0x%p)", module);
+
             if (!grandia_mod::InstallWorldMapPictureHook()) {
                 grandia_mod::LogWarn("DllMain: world-map HD hooks not installed yet");
             }
@@ -62,7 +62,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
             grandia_mod::RemoveGameServices();
             grandia_mod::RemoveOverlayHooks();
             grandia_mod::RemoveClrHost();
-            grandia_mod::LogInfo("DllMain PROCESS_DETACH");
+
             grandia_mod::ShutdownLogging();
             break;
         default:

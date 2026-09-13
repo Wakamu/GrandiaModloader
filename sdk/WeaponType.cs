@@ -1,6 +1,9 @@
 namespace Grandia.Sdk;
 
-/// <summary>Weapon-class bytes at char block +0x74..+0x77.</summary>
+/// <summary>
+/// Weapon-class ids. Character block +0x74..+0x77, and item record +8
+/// (<see cref="ItemEvent.WeaponKind"/>).
+/// </summary>
 public enum WeaponType
 {
     None = 0,

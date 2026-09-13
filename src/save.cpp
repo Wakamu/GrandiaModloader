@@ -2,9 +2,11 @@
 
 #include "catalog.h"
 #include "clr_host.h"
+#include "game.h"
 #include "hook_util.h"
 #include "log.h"
 #include "party.h"
+#include "virt_file.h"
 
 #include <Windows.h>
 
@@ -22,7 +24,10 @@ namespace grandia_mod {
 constexpr std::uintptr_t kSaveFsmEntryRva = 0x2300u;
 constexpr std::uintptr_t kSaveFsmResumeRva = 0x2309u;
 constexpr std::uintptr_t kSaveFwriteCallRva = 0x254Eu;
-constexpr std::uintptr_t kSaveFwriteResumeRva = 0x2554u;
+// After fwrite + fclose + add esp, 14h. The detour owns fclose so the GMOD
+// trailer can be appended to the sealed 0xE80 slot file.
+constexpr std::uintptr_t kSaveFwriteResumeRva = 0x255Au;
+constexpr std::size_t kSaveFwritePatchSize = 12;
 constexpr std::uintptr_t kSaveFopenCallRva = 0x2649u;
 constexpr std::uintptr_t kSaveFopenResumeRva = 0x264Fu;
 constexpr std::uintptr_t kSaveFreadCallRva = 0x2673u;
@@ -51,7 +56,9 @@ constexpr std::uintptr_t kRvaSaveDirPrefix = VaToRva(0x6C1D00u);
 constexpr unsigned kFsmOpConfirmLoad = 3;
 constexpr unsigned kFsmOpSave = 4;
 constexpr std::uint32_t kVanillaSaveSize = 0xE80u;
-constexpr std::uint16_t kGmodVersion = 1;
+constexpr std::uint16_t kGmodVersionWrite = 2;
+constexpr std::uint16_t kGmodVersionMin = 1;
+constexpr std::uint16_t kGmodVersionMax = 2;
 
 #pragma pack(push, 1)
 struct GmodEnvelope {
@@ -77,7 +84,7 @@ void* g_fopen_hook_site = nullptr;
 void* g_confirm_ui_hook_site = nullptr;
 void* g_fsm_hook_site = nullptr;
 std::uint8_t* g_confirm_ui_trampoline = nullptr;
-std::uint8_t g_fwrite_hook_original[8]{};
+std::uint8_t g_fwrite_hook_original[16]{};
 std::uint8_t g_fread_hook_original[8]{};
 std::uint8_t g_fopen_hook_original[8]{};
 std::uint8_t g_confirm_ui_hook_original[8]{};
@@ -93,6 +100,9 @@ std::uint8_t g_committed[kMaxSaveTrailer]{};
 int g_committed_len = 0;
 std::uint8_t g_pending[kMaxSaveTrailer]{};
 int g_pending_len = 0;
+std::uint8_t g_scratch[kMaxSaveTrailer]{};
+SaveEventNative g_save_req{};
+LoadEventNative g_load_req{};
 bool g_pending_present = false;
 bool g_confirm_load_armed = false;
 bool g_load_denied = false;
@@ -110,6 +120,12 @@ void ClearPending() {
     std::memset(g_pending, 0, sizeof(g_pending));
     g_pending_len = 0;
     g_pending_present = false;
+}
+
+void ClearCommittedSaveExtra() {
+    std::memset(g_committed, 0, sizeof(g_committed));
+    g_committed_len = 0;
+    ClearPending();
 }
 
 void RestoreSaveSelectUi() {
@@ -177,8 +193,8 @@ bool PeekGmod(std::FILE* file, std::uint8_t* out, int* out_len) {
         if (g_crt_fread(&env, 1, sizeof(env), file) != sizeof(env)) {
             return false;
         }
-        if (std::memcmp(env.magic, "GMOD", 4) != 0 || env.version != kGmodVersion ||
-            env.length > kMaxSaveTrailer) {
+        if (std::memcmp(env.magic, "GMOD", 4) != 0 || env.version < kGmodVersionMin ||
+            env.version > kGmodVersionMax || env.length > kMaxSaveTrailer) {
             return false;
         }
         if (env.length == 0) {
@@ -223,12 +239,11 @@ void CopyToLoadNative(LoadEventNative* req, int phase, const std::uint8_t* src, 
 }
 
 bool RaiseOnLoad(int phase, const std::uint8_t* src, int len) {
-    LoadEventNative req{};
-    CopyToLoadNative(&req, phase, src, len);
-    if (RuntimeOnLoad(&req) != 0) {
+    CopyToLoadNative(&g_load_req, phase, src, len);
+    if (RuntimeOnLoad(&g_load_req) != 0) {
         return true;
     }
-    return req.allow != 0;
+    return g_load_req.allow != 0;
 }
 
 void EvaluateConfirmLoadAtOp3() {
@@ -238,7 +253,6 @@ void EvaluateConfirmLoadAtOp3() {
     ClearPending();
 
     char path[MAX_PATH]{};
-    std::uint8_t trailer[kMaxSaveTrailer]{};
     int trailer_len = 0;
     bool have_file = false;
 
@@ -246,21 +260,21 @@ void EvaluateConfirmLoadAtOp3() {
         std::FILE* file = g_iat_fopen(path, "rb");
         if (file) {
             have_file = true;
-            PeekGmod(file, trailer, &trailer_len);
+            PeekGmod(file, g_scratch, &trailer_len);
             g_crt_fclose(file);
         }
     } else {
         LogWarn("OnLoad peek: could not build slot path — allowing");
     }
 
-    if (!RaiseOnLoad(0, trailer, trailer_len)) {
+    if (!RaiseOnLoad(0, have_file ? g_scratch : nullptr, trailer_len)) {
         g_load_denied = true;
         g_confirm_load_armed = false;
         return;
     }
 
     if (have_file) {
-        std::memcpy(g_pending, trailer, static_cast<std::size_t>(trailer_len));
+        std::memcpy(g_pending, g_scratch, static_cast<std::size_t>(trailer_len));
         g_pending_len = trailer_len;
         g_pending_present = true;
     }
@@ -269,48 +283,137 @@ void EvaluateConfirmLoadAtOp3() {
     g_load_denied = false;
 }
 
-void AppendTrailer(std::FILE* file) {
+bool VanillaFwriteLooksComplete(std::size_t size, std::size_t count, std::size_t result) {
+    if (!IsVanillaSaveIo(size, count)) {
+        return false;
+    }
+    if (result == kVanillaSaveSize || result == count) {
+        return true;
+    }
+    return count == 1 && result == 1 && size == kVanillaSaveSize;
+}
+
+void FillGmodEnvelope(GmodEnvelope* env, int len) {
+    env->magic[0] = 'G';
+    env->magic[1] = 'M';
+    env->magic[2] = 'O';
+    env->magic[3] = 'D';
+    env->version = kGmodVersionWrite;
+    env->length = static_cast<std::uint16_t>(len);
+}
+
+bool WriteGmodToPath(const char* path, const std::uint8_t* payload, int len) {
+    if (!path || !path[0] || len < 0) {
+        return false;
+    }
+    HANDLE file = CreateFileA(path, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        LogWarn("OnSave: CreateFile failed err=%u path=%s", GetLastError(), path);
+        return false;
+    }
+    LARGE_INTEGER pos{};
+    pos.QuadPart = static_cast<LONGLONG>(kVanillaSaveSize);
+    if (!SetFilePointerEx(file, pos, nullptr, FILE_BEGIN)) {
+        CloseHandle(file);
+        return false;
+    }
+    GmodEnvelope env{};
+    FillGmodEnvelope(&env, len);
+    DWORD wrote = 0;
+    bool ok = WriteFile(file, &env, sizeof(env), &wrote, nullptr) && wrote == sizeof(env);
+    if (ok && len > 0) {
+        ok = WriteFile(file, payload, static_cast<DWORD>(len), &wrote, nullptr) &&
+             wrote == static_cast<DWORD>(len);
+    }
+    if (ok) {
+        LARGE_INTEGER end{};
+        end.QuadPart = static_cast<LONGLONG>(kVanillaSaveSize + sizeof(env) +
+                                             static_cast<unsigned>(len));
+        ok = SetFilePointerEx(file, end, nullptr, FILE_BEGIN) && SetEndOfFile(file);
+    }
+    CloseHandle(file);
+    return ok;
+}
+
+bool WriteGmodViaFopenAb(const char* path, const std::uint8_t* payload, int len) {
+    if (!path || !g_iat_fopen || !g_crt_fwrite || !g_crt_fclose) {
+        return false;
+    }
+    std::FILE* file = g_iat_fopen(path, "ab");
+    if (!file) {
+        return false;
+    }
+    GmodEnvelope env{};
+    FillGmodEnvelope(&env, len);
+    bool ok = g_crt_fwrite(&env, 1, sizeof(env), file) == sizeof(env);
+    if (ok && len > 0) {
+        ok = g_crt_fwrite(payload, 1, static_cast<std::size_t>(len), file) ==
+             static_cast<std::size_t>(len);
+    }
+    g_crt_fclose(file);
+    return ok;
+}
+
+void PersistTrailer(std::FILE* file) {
     RestoreFieldPartyForSave();
-    if (!file || !g_crt_fwrite) {
-        return;
+    CopyToNative(&g_save_req, g_committed, g_committed_len);
+    if (RuntimeOnSave(&g_save_req) != 0) {
+        LogWarn("OnSave CLR failed — writing last committed extra");
+        CopyToNative(&g_save_req, g_committed, g_committed_len);
     }
-    SaveEventNative req{};
-    CopyToNative(&req, g_committed, g_committed_len);
-    if (RuntimeOnSave(&req) != 0) {
-        return;
-    }
-    int len = req.trailer_len;
+    int len = g_save_req.trailer_len;
     if (len < 0) {
         len = 0;
     }
     if (len > kMaxSaveTrailer) {
         len = kMaxSaveTrailer;
     }
-    __try {
+
+    if (file && g_crt_fwrite) {
         GmodEnvelope env{};
-        env.magic[0] = 'G';
-        env.magic[1] = 'M';
-        env.magic[2] = 'O';
-        env.magic[3] = 'D';
-        env.version = kGmodVersion;
-        env.length = static_cast<std::uint16_t>(len);
-        if (g_crt_fwrite(&env, 1, sizeof(env), file) != sizeof(env)) {
-            LogWarn("OnSave GMOD header fwrite failed");
-            return;
+        FillGmodEnvelope(&env, len);
+        const bool wrote_hdr = g_crt_fwrite(&env, 1, sizeof(env), file) == sizeof(env);
+        const bool wrote_body =
+            len <= 0 || g_crt_fwrite(g_save_req.trailer, 1, static_cast<std::size_t>(len), file) ==
+                            static_cast<std::size_t>(len);
+        if (!wrote_hdr || !wrote_body) {
+            LogWarn("OnSave: FILE* GMOD fwrite failed");
         }
-        if (len > 0 && g_crt_fwrite(req.trailer, 1, static_cast<std::size_t>(len), file) !=
-                           static_cast<std::size_t>(len)) {
-            LogWarn("OnSave GMOD payload fwrite failed");
-            return;
-        }
-        std::memcpy(g_committed, req.trailer, static_cast<std::size_t>(len));
-        g_committed_len = len;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        LogWarn("OnSave trailer fwrite faulted");
     }
+    if (file && g_crt_fclose) {
+        g_crt_fclose(file);
+    }
+
+    char path[MAX_PATH]{};
+    if (!BuildSelectedSlotPath(path, sizeof(path))) {
+        LogWarn("OnSave: could not build slot path");
+        return;
+    }
+
+    bool ok = false;
+    __try {
+        ok = WriteGmodToPath(path, g_save_req.trailer, len);
+        if (!ok) {
+            const DWORD err = GetLastError();
+            LogWarn("OnSave: Win32 write failed err=%u path=%s — trying fopen ab", err, path);
+            ok = WriteGmodViaFopenAb(path, g_save_req.trailer, len);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        LogWarn("OnSave trailer write faulted");
+        ok = false;
+    }
+    if (!ok) {
+        LogWarn("OnSave: GMOD not written path=%s", path);
+        return;
+    }
+    std::memcpy(g_committed, g_save_req.trailer, static_cast<std::size_t>(len));
+    g_committed_len = len;
+
 }
 
 void CommitApplied() {
+    ResetLiveSavePointers();
     const std::uint8_t* src = g_pending_present ? g_pending : nullptr;
     const int len = g_pending_present ? g_pending_len : 0;
     RaiseOnLoad(1, src, len);
@@ -404,10 +507,9 @@ extern "C" void ModOnSaveFopenGate() {
         }
         return;
     }
-    std::uint8_t trailer[grandia_mod::kMaxSaveTrailer]{};
     int trailer_len = 0;
-    grandia_mod::PeekGmod(file, trailer, &trailer_len);
-    if (!grandia_mod::RaiseOnLoad(0, trailer, trailer_len)) {
+    grandia_mod::PeekGmod(file, grandia_mod::g_scratch, &trailer_len);
+    if (!grandia_mod::RaiseOnLoad(0, grandia_mod::g_scratch, trailer_len)) {
         if (grandia_mod::g_crt_fclose) {
             grandia_mod::g_crt_fclose(file);
         }
@@ -416,7 +518,7 @@ extern "C" void ModOnSaveFopenGate() {
         grandia_mod::g_load_denied = false;
         g_mod_save_load_denied = 0;
         grandia_mod::RestoreSaveSelectUi();
-        grandia_mod::LogInfo("OnLoad fopen backstop deny");
+
         return;
     }
     if (grandia_mod::g_crt_fseek) {
@@ -426,14 +528,20 @@ extern "C" void ModOnSaveFopenGate() {
 
 extern "C" void ModOnSaveFwriteComplete() {
     auto* file = reinterpret_cast<std::FILE*>(const_cast<void*>(g_mod_save_io_file));
-    if (!grandia_mod::IsVanillaSaveIo(g_mod_save_io_size, g_mod_save_io_count)) {
+    g_mod_save_io_file = nullptr;
+    if (!grandia_mod::VanillaFwriteLooksComplete(g_mod_save_io_size, g_mod_save_io_count,
+                                                 g_mod_save_io_result)) {
+        if (file && grandia_mod::g_crt_fclose) {
+            grandia_mod::g_crt_fclose(file);
+        }
+        grandia_mod::LogWarn(
+            "OnSave fwrite incomplete size=%u count=%u result=%u — skipping trailer",
+            static_cast<unsigned>(g_mod_save_io_size),
+            static_cast<unsigned>(g_mod_save_io_count),
+            static_cast<unsigned>(g_mod_save_io_result));
         return;
     }
-    if (g_mod_save_io_result != grandia_mod::kVanillaSaveSize) {
-        grandia_mod::LogWarn("OnSave fwrite incomplete — skipping trailer");
-        return;
-    }
-    grandia_mod::AppendTrailer(file);
+    grandia_mod::PersistTrailer(file);
 }
 
 extern "C" void ModOnSaveFreadComplete() {
@@ -506,6 +614,7 @@ extern "C" __declspec(naked) void ModSaveFwriteDetour() {
         mov esp, dword ptr [esp]
         popad
 
+        add esp, 10h
         mov eax, dword ptr [g_mod_save_io_result]
         jmp dword ptr [g_mod_save_fwrite_resume]
     }
@@ -621,6 +730,11 @@ bool InstallSaveHooks() {
         LogWarn("OnSave/OnLoad: fwrite/fread/fopen call-site mismatch");
         return false;
     }
+    if (fwrite_site[6] != 0x56 || fwrite_site[7] != 0xFF || fwrite_site[8] != 0xD7 ||
+        fwrite_site[9] != 0x83 || fwrite_site[10] != 0xC4 || fwrite_site[11] != 0x14) {
+        LogWarn("OnSave/OnLoad: fwrite fclose sequence mismatch at +0x2554");
+        return false;
+    }
     if (confirm_ui_site[0] != 0xC6 || confirm_ui_site[1] != 0x05 || confirm_ui_site[6] != 0x02) {
         LogWarn("OnSave/OnLoad: confirm-UI site mismatch at +0x%X",
                 static_cast<unsigned>(kSaveConfirmUiRva));
@@ -631,26 +745,35 @@ bool InstallSaveHooks() {
         return false;
     }
 
-    g_crt_fwrite = reinterpret_cast<FwriteFn>(ReadIatFunction(fwrite_site));
-    g_crt_fread = reinterpret_cast<FreadFn>(ReadIatFunction(fread_site));
-    g_iat_fopen = reinterpret_cast<FopenFn>(ReadIatFunction(fopen_site));
-    if (!g_crt_fwrite || !g_crt_fread || !g_iat_fopen) {
-        LogWarn("OnSave/OnLoad: IAT fwrite/fread/fopen unresolved");
-        return false;
-    }
+    CrtStdioFns crt{};
+    if (VirtFileOrigStdio(&crt)) {
 
-    HMODULE crt_mod = nullptr;
-    if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                            reinterpret_cast<LPCSTR>(g_crt_fread), &crt_mod) ||
-        !crt_mod) {
-        LogWarn("OnSave/OnLoad: CRT module unresolved");
-        return false;
+    } else {
+        const char* dlls[] = {"ucrtbase.dll", "api-ms-win-crt-stdio-l1-1-0.dll", "msvcrt.dll"};
+        for (auto* name : dlls) {
+            HMODULE mod = GetModuleHandleA(name);
+            if (!mod) {
+                continue;
+            }
+            crt.fopen = reinterpret_cast<FopenFn>(GetProcAddress(mod, "fopen"));
+            crt.fclose = reinterpret_cast<FcloseFn>(GetProcAddress(mod, "fclose"));
+            crt.fread = reinterpret_cast<FreadFn>(GetProcAddress(mod, "fread"));
+            crt.fwrite = reinterpret_cast<FwriteFn>(GetProcAddress(mod, "fwrite"));
+            crt.fseek = reinterpret_cast<FseekFn>(GetProcAddress(mod, "fseek"));
+            if (crt.fopen && crt.fclose && crt.fread && crt.fwrite && crt.fseek) {
+
+                break;
+            }
+            crt = {};
+        }
     }
-    g_crt_fseek = reinterpret_cast<FseekFn>(GetProcAddress(crt_mod, "fseek"));
-    g_crt_fclose = reinterpret_cast<FcloseFn>(GetProcAddress(crt_mod, "fclose"));
-    if (!g_crt_fseek || !g_crt_fclose) {
-        LogWarn("OnSave/OnLoad: fseek/fclose unresolved");
+    g_crt_fwrite = crt.fwrite;
+    g_crt_fread = crt.fread;
+    g_iat_fopen = crt.fopen;
+    g_crt_fseek = crt.fseek;
+    g_crt_fclose = crt.fclose;
+    if (!g_crt_fwrite || !g_crt_fread || !g_iat_fopen || !g_crt_fseek || !g_crt_fclose) {
+        LogWarn("OnSave/OnLoad: CRT fopen/fread/fwrite/fseek/fclose unresolved");
         return false;
     }
 
@@ -694,7 +817,7 @@ bool InstallSaveHooks() {
             g_confirm_ui_hook_site = nullptr;
         }
         if (g_fwrite_hook_site) {
-            RestoreBytes(g_fwrite_hook_site, g_fwrite_hook_original, kCallIatPatchSize);
+            RestoreBytes(g_fwrite_hook_site, g_fwrite_hook_original, kSaveFwritePatchSize);
             g_fwrite_hook_site = nullptr;
         }
         if (g_fsm_hook_site) {
@@ -717,7 +840,7 @@ bool InstallSaveHooks() {
     g_fsm_hook_site = fsm_site;
 
     if (!WriteJump(fwrite_site, reinterpret_cast<void*>(&ModSaveFwriteDetour), g_fwrite_hook_original,
-                   kCallIatPatchSize)) {
+                   kSaveFwritePatchSize)) {
         rollback_all();
         LogWarn("OnSave/OnLoad: fwrite hook failed");
         return false;
@@ -748,11 +871,6 @@ bool InstallSaveHooks() {
     }
     g_fread_hook_site = fread_site;
 
-    LogInfo(
-        "OnSave/OnLoad hooks (FSM +0x%X, confirm-UI +0x%X, fopen +0x%X, fwrite +0x%X, fread +0x%X)",
-        static_cast<unsigned>(kSaveFsmEntryRva), static_cast<unsigned>(kSaveConfirmUiRva),
-        static_cast<unsigned>(kSaveFopenCallRva), static_cast<unsigned>(kSaveFwriteCallRva),
-        static_cast<unsigned>(kSaveFreadCallRva));
     return true;
 #endif
 }
@@ -772,7 +890,7 @@ void RemoveSaveHooks() {
         g_confirm_ui_hook_site = nullptr;
     }
     if (g_fwrite_hook_site) {
-        RestoreBytes(g_fwrite_hook_site, g_fwrite_hook_original, kCallIatPatchSize);
+        RestoreBytes(g_fwrite_hook_site, g_fwrite_hook_original, kSaveFwritePatchSize);
         g_fwrite_hook_site = nullptr;
     }
     if (g_fsm_hook_site) {

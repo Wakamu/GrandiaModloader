@@ -24,9 +24,15 @@ struct MapPatchInfoNative {
     std::int32_t stock_scn_len;
     std::int32_t stock_ofs_len;
     std::int32_t dirty;
+    std::uint32_t sec29;
+    std::int32_t sec29_len;
+    std::uint32_t sec8;
+    std::int32_t sec8_len;
+    std::uint32_t sec21;
+    std::int32_t sec21_len;
 };
 #pragma pack(pop)
-static_assert(sizeof(MapPatchInfoNative) == 52, "MapPatchInfoNative pack must match C#");
+static_assert(sizeof(MapPatchInfoNative) == 76, "MapPatchInfoNative pack must match C#");
 
 int RuntimeMapPatchInfo(const char* stem, MapPatchInfoNative* info);
 
@@ -135,7 +141,8 @@ struct WorldMapLoadNative {
 static_assert(sizeof(WorldMapLoadNative) == 9524, "WorldMapLoadNative pack must match C#");
 #pragma pack(pop)
 
-constexpr int kMaxSaveTrailer = 1024;
+// Keep in sync with GameSaveData.MaxBytes (GMOD v2 JSON bag).
+constexpr int kMaxSaveTrailer = 32768;
 
 #pragma pack(push, 1)
 struct SaveEventNative {
@@ -152,6 +159,8 @@ struct LoadEventNative {
     std::uint8_t trailer[kMaxSaveTrailer];
 };
 #pragma pack(pop)
+static_assert(sizeof(SaveEventNative) == 8 + kMaxSaveTrailer, "SaveEventNative pack must match C#");
+static_assert(sizeof(LoadEventNative) == 16 + kMaxSaveTrailer, "LoadEventNative pack must match C#");
 
 int RuntimeOnEventFlag(EventFlagNative* req);
 int RuntimeOnItemAssignUi(ItemAssignNative* req);
@@ -247,6 +256,25 @@ struct ShopOpenNative {
 
 int RuntimeOnBattleLoad(BattleLoadNative* req);
 int RuntimeOnBattleSetup(BattleLoadNative* req);
+
+constexpr unsigned kVictoryMaxDrops = 16;
+
+#pragma pack(push, 1)
+struct VictoryNative {
+    std::int32_t exp;
+    std::int32_t gold;
+    std::int32_t drop_count;
+    std::int32_t drop[kVictoryMaxDrops];
+    std::uint16_t map;
+    std::uint16_t dest;
+    std::int32_t spawn;
+    std::int32_t encounter_table;
+    std::int32_t encounter_row;
+};
+#pragma pack(pop)
+static_assert(sizeof(VictoryNative) == 92, "VictoryNative pack must match C#");
+
+int RuntimeOnVictory(VictoryNative* req);
 int RuntimeOnMenuOpen(MenuOpenNative* req);
 int RuntimeOnEnemyLoaded(EnemyLoadedNative* req);
 int RuntimeOnShopOpen(ShopOpenNative* req);
@@ -380,5 +408,54 @@ static_assert(sizeof(DialogueNative) == 16 + 2 + 2 + 4 + 4 + 4 + 4 + 4 + 4096 + 
               "DialogueNative pack must match C#");
 
 int RuntimeOnDialogue(DialogueNative* req);
+
+#pragma pack(push, 1)
+struct HdTextureNative {
+    char path[260];
+    std::uint32_t src;
+    std::int32_t src_len;
+    std::uint32_t dest;
+    std::int32_t dest_len;
+    std::uint32_t decode;
+    std::uint32_t encode;
+    std::uint32_t free_buf;
+};
+#pragma pack(pop)
+static_assert(sizeof(HdTextureNative) == 260 + 28, "HdTextureNative pack must match C#");
+
+int RuntimeOnHdTexture(HdTextureNative* req);
+int RuntimeHasHdTextureHooks();
+
+#pragma pack(push, 1)
+struct HdSpriteMatchNative {
+    char path[260];
+    std::int32_t index;
+    std::int32_t rec_len;
+    std::uint8_t record[32];
+    std::uint32_t object;
+};
+#pragma pack(pop)
+static_assert(sizeof(HdSpriteMatchNative) == 260 + 8 + 32 + 4, "HdSpriteMatchNative pack must match C#");
+
+int RuntimeOnHdSpriteMatch(HdSpriteMatchNative* req);
+int RuntimeHasHdSpriteMatchHooks();
+
+#pragma pack(push, 1)
+struct HdSpriteDrawNative {
+    char path[260];
+    std::int32_t index;
+    std::int32_t rec_len;
+    std::uint8_t record[32];
+    std::uint16_t live_x;
+    std::uint16_t live_y;
+    std::uint16_t live_w;
+    std::uint16_t live_h;
+    std::uint32_t object;
+};
+#pragma pack(pop)
+static_assert(sizeof(HdSpriteDrawNative) == 260 + 8 + 32 + 8 + 4, "HdSpriteDrawNative pack must match C#");
+
+int RuntimeOnHdSpriteDraw(HdSpriteDrawNative* req);
+int RuntimeHasHdSpriteDrawHooks();
 
 }  // namespace grandia_mod

@@ -257,7 +257,6 @@ void PrepareText1(const char* path) {
     if (VirtFileHasText1() || !path || !g_orig_fopen) {
         return;
     }
-    LogInfo("TEXT1 prepare %s", path);
 
     FILE* file = g_orig_fopen(path, "rb");
     if (!file) {
@@ -292,7 +291,7 @@ void PrepareText1(const char* path) {
     }
     VirtFileSetText1(reinterpret_cast<const std::uint8_t*>(static_cast<std::uintptr_t>(req.dest)),
                      static_cast<std::size_t>(req.dest_len));
-    LogInfo("TEXT1 in-place %d bytes", req.dest_len);
+
 }
 
 }  // namespace
@@ -355,8 +354,10 @@ FILE* __cdecl ModFopenHook(const char* path, const char* mode) {
     }
 
     if (IsText1Path(path)) {
-        LogInfo("TEXT1 fopen %s (patch off)", path);
+
     }
+
+    PrepareHdAsset(path);
 
     if (FILE* virt = VirtFileOpen(path, mode)) {
         return virt;
@@ -401,9 +402,9 @@ bool InstallOverlayHooks() {
 
     g_overlay_root = ResolveOverlayRoot();
     if (!g_overlay_root.empty()) {
-        LogInfo("Map assemble cache %s (apply after bind, no fopen remap)", g_overlay_root.c_str());
+
     } else {
-        LogInfo("Map assemble cache idle (overlay_root.txt, overlay/ next to DLL, or GRANDIA_FIELD_PATCH)");
+
     }
     if (!InstallMapApplyHooks()) {
         LogWarn("map apply bind hooks not installed");
@@ -426,7 +427,7 @@ bool InstallOverlayHooks() {
     if (!InstallVirtFileHooks()) {
         LogWarn("virt file IAT hooks not installed — embedded maps will not load");
     }
-    LogInfo("fopen IAT patched");
+
     return true;
 }
 

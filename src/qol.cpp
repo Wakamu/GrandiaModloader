@@ -4,6 +4,9 @@
 #include "clr_host.h"
 #include "d3d_hud.h"
 #include "game.h"
+#include "menu.h"
+#include "field_run.h"
+#include "travel.h"
 #include "hook_util.h"
 #include "log.h"
 
@@ -464,7 +467,7 @@ bool InstallSpeedTurboIat() {
         g_tgt_init = false;
     }
     g_turbo_installed = true;
-    LogInfo("QoL turbo IAT ready (%d hooks, 0/2..5 via Game.Turbo)", total);
+
     return true;
 #endif
 }
@@ -592,7 +595,7 @@ bool InstallPadBlockHook() {
             } else {
                 g_pad_site = site;
                 any = true;
-                LogInfo("OnTick pad-fill hook at +0x58F0 (BlockGameInput, save/UI)");
+
             }
         }
     }
@@ -608,7 +611,7 @@ bool InstallPadBlockHook() {
         }
         g_title_pad_call_site[i] = call;
         any = true;
-        LogInfo("Title pad-fill call hook at +0x%X", static_cast<unsigned>(kTitlePadCallRvas[i]));
+
     }
 
     auto* menu = reinterpret_cast<std::uint8_t*>(base + kTitleMenuInputRva);
@@ -632,7 +635,7 @@ bool InstallPadBlockHook() {
             } else {
                 g_title_menu_site = menu;
                 any = true;
-                LogInfo("Title menu input gate at +0x7C34 (BlockGameInput)");
+
             }
         }
     }
@@ -714,7 +717,7 @@ void StartTickThread() {
         LogWarn("QoL OnTick watcher thread failed");
         return;
     }
-    LogInfo("QoL OnTick watcher ~60 Hz");
+
 }
 
 void StopTickThread() {
@@ -808,7 +811,7 @@ int TurboSet(int level) {
     const int next = ClampSpeedLevel(level);
     g_speed_level.store(next, std::memory_order_relaxed);
     ApplyEffectiveSpeed();
-    LogInfo("Game.Turbo.Level=%d", next);
+
     return 1;
 }
 
@@ -831,7 +834,7 @@ int EncountersSet(int off) {
     if (ModFlagSet(kEncounterFlagId, off ? 1 : 0) == 0) {
         return 0;
     }
-    LogInfo("Game.Encounters.Disabled=%d", off ? 1 : 0);
+
     return 1;
 }
 
@@ -856,7 +859,7 @@ int DebugSet(int on) {
     if (!SafeWriteU32(base + kDebugFlagRva, word)) {
         return 0;
     }
-    LogInfo("Game.Debug.Enabled=%d", on ? 1 : 0);
+
     return 1;
 }
 
@@ -891,7 +894,11 @@ void RaiseTick() {
     req.right_trigger = static_cast<std::uint8_t>((packed >> 24) & 0xFFu);
     req.block = 0;
     RuntimeOnTick(&req);
-    SetBlockGamePad(req.block != 0);
+    OverlayInputOnTick(packed);
+    SetBlockGamePad(req.block != 0 || OverlayInputActive());
+    MenuOnTick();
+    TryApplyPendingTravel();
+    TryApplyPendingFieldRun();
 }
 
 void OnPadRefreshed() {

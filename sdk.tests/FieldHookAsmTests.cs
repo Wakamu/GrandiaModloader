@@ -22,6 +22,12 @@ public class FieldHookAsmTests
         "1f11000040010740000a00020005000300000000")]
     [InlineData("hook 52 present_channel 1 delay=3 follow=9", "3401000000010000000000000000000003000009")]
     [InlineData("hook 10 anim 7 unit=2 mode=1", "0a10000090070200000000000000000000000000")]
+    [InlineData("hook 18 anim 2 talk=41 mode=2", "12100000a0022900000000000000000000000000")]
+    [InlineData("hook 206 party_actor instance_facing talk=3 facing=5", "ce1d000048010305000000000000000000000000")]
+    [InlineData("hook 206 party_actor instance_facing char=1 talk=3 facing=5", "ce1d000048010305000000000000000000000000")]
+    [InlineData("hook 22 party_actor instance_facing talk=2 facing=3 flags=0x08", "161d000008010203000000000000000000000000")]
+    [InlineData("hook 206 party_actor instance_facing party=3 facing=5", "ce1d000048000305000000000000000000000000")]
+    [InlineData("hook 206 party_actor instance_facing char=0 p0=3 p1=5", "ce1d000048000305000000000000000000000000")]
     [InlineData("hook 54 scripted_battle table=0x61 5x1", "3619000040610000510000000000000000000000")]
     [InlineData("hook 49 scripted_battle table=0x06 1x1 2x1 3x1 word=0x4A trig=0x08",
         "311908004006004a112131000000000000000000")]
@@ -43,6 +49,30 @@ public class FieldHookAsmTests
     public void AssembleZone_matches_python(string line, string hex)
     {
         Assert.Equal(hex, Convert.ToHexString(FieldHookAsm.AssembleZone(line)).ToLowerInvariant());
+    }
+
+    [Fact]
+    public void FormatHook_names_talk_id_operands()
+    {
+        var facing = FieldHookAsm.AssembleHook("hook 206 party_actor instance_facing talk=3 facing=5");
+        Assert.Equal(1, facing[5]);
+        Assert.Contains("talk=3", FieldHookAsm.FormatHook(facing));
+        Assert.Contains("facing=5", FieldHookAsm.FormatHook(facing));
+        Assert.DoesNotContain("char=", FieldHookAsm.FormatHook(facing));
+        Assert.DoesNotContain("p0=", FieldHookAsm.FormatHook(facing));
+
+        var party = FieldHookAsm.AssembleHook("hook 206 party_actor instance_facing party=3 facing=5");
+        Assert.Equal(0, party[5]);
+        Assert.Contains("party=3", FieldHookAsm.FormatHook(party));
+        Assert.DoesNotContain("talk=", FieldHookAsm.FormatHook(party));
+
+        var latch = FieldHookAsm.AssembleHook("hook 18 anim 2 talk=41 mode=2");
+        Assert.Contains("talk=41", FieldHookAsm.FormatHook(latch));
+        Assert.DoesNotContain("unit=", FieldHookAsm.FormatHook(latch));
+
+        var latchParty = FieldHookAsm.AssembleHook("hook 10 anim 7 unit=2 mode=1");
+        Assert.Contains("unit=2", FieldHookAsm.FormatHook(latchParty));
+        Assert.DoesNotContain("talk=", FieldHookAsm.FormatHook(latchParty));
     }
 
     [Fact]
@@ -75,6 +105,11 @@ public class FieldHookAsmTests
     [InlineData("hook 3 setup dest=0x2000 spawn=2 if_clear=0x1A")]
     [InlineData("hook 2 sys_latch present_flag_713f83 param=1 value=1")]
     [InlineData("hook 14 party_actor walk char=2 p0=1")]
+    [InlineData("hook 10 anim 7 unit=2 mode=1")]
+    [InlineData("hook 18 anim 2 talk=41 mode=2")]
+    [InlineData("hook 206 party_actor instance_facing talk=3 facing=5")]
+    [InlineData("hook 22 party_actor instance_facing talk=2 facing=3 flags=0x08")]
+    [InlineData("hook 206 party_actor instance_facing party=3 facing=5")]
     [InlineData("hook 54 scripted_battle table=0x61 5x1")]
     [InlineData("hook 49 scripted_battle table=0x06 1x1 2x1 3x1 word=0x4A trig=0x08")]
     [InlineData("hook 77 scripted_battle table=0x58 1x1 2x1")]

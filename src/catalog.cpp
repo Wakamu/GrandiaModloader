@@ -316,7 +316,7 @@ void ScanBattleItemTables() {
     }
     g_battle_sec3_scanned = true;
     if (g_battle_sec3_n > 0) {
-        LogInfo("Battle item tables %u", g_battle_sec3_n);
+
     }
 }
 
@@ -887,7 +887,7 @@ void FireItemCatalog() {
         LogWarn("WINDT finalize: no live sec3 yet");
         return;
     }
-    LogInfo("OnItem catalog begin aliases=%u", nsec);
+
     ClearCatalogSell();
     for (int id = 1; id <= 511; ++id) {
         const auto off = static_cast<unsigned>(id - 1) * kWindtRecSize;
@@ -933,14 +933,6 @@ void FireItemCatalog() {
         }
     }
     g_items_fired.store(1, std::memory_order_release);
-    if (nsec > 0) {
-        auto* coal = secs[nsec - 1] + 63u * kWindtRecSize;
-        if (PtrReadable(coal, kWindtRecSize) && Read16(coal) == 64) {
-            LogInfo("Item64 aliases=%u p2=%u icon=%u u7=%u u8=%u", nsec, coal[16], coal[6],
-                    coal[7], coal[8]);
-        }
-    }
-    LogInfo("OnItem catalog done");
 }
 
 void TryFireItemsPoll() {
@@ -1258,13 +1250,8 @@ bool InstallCatalogHooks() {
             ++ok;
         }
         g_windt_finalize_hooked = ok > 0;
-        if (ok > 0) {
-            LogInfo("OnItem / OnMagic at WINDT finalize (%u/3 sites)", ok);
-        }
     }
 #endif
-    LogInfo("OnCharacter: after load copy / new-game party (Justin level > 0)");
-    LogInfo("OnMagic: WINDT sec7/sec8 (menus) + STAT/BBG (battle); Cost is MP/SP at combat row id-1");
     return true;
 }
 

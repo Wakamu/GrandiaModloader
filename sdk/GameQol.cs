@@ -46,6 +46,45 @@ public sealed class GameTurbo
 }
 
 /// <summary>
+/// Battle XP multipliers from slot_data (1 = vanilla). Magic and skill are
+/// per-gain; level multiplies in-fight kill EXP into the victory pot.
+/// </summary>
+public sealed class GameXp
+{
+    public const int Min = 1;
+    public const int Max = 100;
+
+    public int Magic
+    {
+        get => Get(0);
+        set => Set(0, value);
+    }
+
+    public int Skill
+    {
+        get => Get(1);
+        set => Set(1, value);
+    }
+
+    public int Level
+    {
+        get => Get(2);
+        set => Set(2, value);
+    }
+
+    private static int Get(int kind)
+    {
+        var n = Game.Native?.XpGet(kind) ?? Min;
+        return n < Min ? Min : n;
+    }
+
+    private static void Set(int kind, int multiplier)
+    {
+        Game.Native?.XpSet(kind, multiplier);
+    }
+}
+
+/// <summary>
 /// Random field encounters. Same bit as Map debug "ENCOUNT OFF" (flag <c>0x08FD</c>).
 /// Needs a loaded save (flag blob).
 /// </summary>

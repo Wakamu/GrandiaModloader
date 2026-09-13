@@ -32,7 +32,6 @@ internal static class ScriptAssembler
             Cache[key] = bytes;
         }
 
-        log?.Invoke($"assemble script 0x{scriptId:X4} on {stem} ({bytes.Length} bytes)");
         return bytes;
     }
 

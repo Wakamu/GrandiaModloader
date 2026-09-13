@@ -49,7 +49,7 @@ public static partial class FieldHookAsm
         [5] = "set_busy",
         [6] = "set_field_byte",
         [7] = "set_party_byte",
-        [8] = "instance_facing",
+        [8] = "instance_facing", // +5 bit0: talk= NPC / party= member; facing= 0..7
     };
 
     private static readonly Dictionary<int, string> VisibilitySubtypes = new()
@@ -256,7 +256,9 @@ public static partial class FieldHookAsm
         if (kind.Equals("anim", StringComparison.OrdinalIgnoreCase))
         {
             var anim = args.Count > 0 ? ParseInt(args[0]) : 0;
-            var unit = kv.TryGetValue("unit", out var un) ? ParseInt(un) : 0;
+            // mode 2: unit/talk is sec[8] TalkId. mode 0/1: other actor key (not TalkId).
+            var unit = kv.TryGetValue("talk", out var tk) ? ParseInt(tk)
+                : kv.TryGetValue("unit", out var un) ? ParseInt(un) : 0;
             var mode = kv.TryGetValue("mode", out var md) ? ParseInt(md) : 1;
             var slot = kv.TryGetValue("slot", out var sl) ? ParseInt(sl) : 0;
             return ApplyKvGate(
@@ -615,8 +617,25 @@ public static partial class FieldHookAsm
                 var sub = LookupUnique(PartyActorSubtypes, args[0]) & 0xF;
                 fields[4] = U8(flags ?? (0x40 | sub));
                 PutOptU8(fields, kv, "char", 5);
-                PutOptU8(fields, kv, "p0", 6);
-                PutOptU8(fields, kv, "p1", 7);
+                if (sub == 8)
+                {
+                    PutOptU8(fields, kv, "p0", 6);
+                    PutOptU8(fields, kv, "party", 6);
+                    PutOptU8(fields, kv, "talk", 6);
+                    PutOptU8(fields, kv, "p1", 7);
+                    PutOptU8(fields, kv, "facing", 7);
+                    // +0x78691: test [row+5], 1 → talk-id lookup; else party grid vs +6.
+                    if (kv.ContainsKey("talk") && !kv.ContainsKey("char"))
+                    {
+                        fields[5] = (fields.GetValueOrDefault(5) | 1) & 0xFF;
+                    }
+                }
+                else
+                {
+                    PutOptU8(fields, kv, "p0", 6);
+                    PutOptU8(fields, kv, "p1", 7);
+                }
+
                 PutOptU8(fields, kv, "p2", 8);
                 PutOptU8(fields, kv, "p3", 9);
                 PutOptU8(fields, kv, "p4", 0xA);

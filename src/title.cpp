@@ -4,6 +4,8 @@
 #include "hook_util.h"
 #include "log.h"
 #include "catalog.h"
+#include "game.h"
+#include "save.h"
 
 #include <Windows.h>
 
@@ -16,8 +18,10 @@ void ModTitleScreenDetour();
 }
 
 extern "C" void ModOnTitleScreen() {
-    grandia_mod::ResetCharacterSession();
-    grandia_mod::RuntimeOnTitleScreen();
+        grandia_mod::ResetCharacterSession();
+        grandia_mod::ClearCommittedSaveExtra();
+        grandia_mod::ResetLiveSavePointers();
+        grandia_mod::RuntimeOnTitleScreen();
 }
 
 extern "C" __declspec(naked) void ModTitleScreenDetour() {
@@ -71,7 +75,7 @@ bool InstallTitleScreenHook() {
         return false;
     }
     g_title_screen_site = site;
-    LogInfo("OnTitleScreen hook at +0x7700 (Press Start / TITLE.DAT)");
+
     return true;
 #endif
 }

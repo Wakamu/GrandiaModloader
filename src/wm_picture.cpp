@@ -420,7 +420,7 @@ bool EnsureGpu() {
         return false;
     }
     g_gpu_ready = true;
-    LogInfo("world-map HD: overlay shaders ready");
+
     return true;
 }
 
@@ -590,8 +590,7 @@ bool DrawOverlays() {
         Ps1ToNdc(pin_x, pin_y, &x0, &y0);
         Ps1ToNdc(pin_x + draw_w, pin_y + draw_h, &x1, &y1);
         if (g_overlay_logs < 1) {
-            LogInfo("world-map HD: NDC dest=(%d,%d) pin=(%d,%d) ndc=%.3f,%.3f..%.3f,%.3f virt=%dx%d",
-                    pic.dest_x, pic.dest_y, pin_x, pin_y, x0, y0, x1, y1, g_virt_sw, g_virt_sh);
+
         }
         quad[0] = {x0, y0, 0.0f, 0.0f};
         quad[1] = {x1, y0, 1.0f, 0.0f};
@@ -687,7 +686,7 @@ bool DrawOverlays() {
 
     if (any && g_overlay_logs < 1) {
         ++g_overlay_logs;
-        LogInfo("world-map HD: custom plate overlay active");
+
     }
     return any;
 }
@@ -714,7 +713,7 @@ bool SrvIsAtlas(ID3D11ShaderResourceView* srv) {
                 }
                 g_atlas = tex;
                 g_atlas->AddRef();
-                LogInfo("world-map HD: areamap atlas %ux%u", desc.Width, desc.Height);
+
             }
             hit = true;
         }
@@ -817,9 +816,7 @@ void NoteSoftHdViewport(const D3D11_VIEWPORT& vp) {
         g_ui_vp_letterbox = letterbox;
         if (g_draw_logs < 6) {
             ++g_draw_logs;
-            LogInfo("world-map HD: SoftHD VP %.0f,%.0f %.0fx%.0f letterbox=%d loop=%d", vp.TopLeftX,
-                    vp.TopLeftY, vp.Width, vp.Height, letterbox ? 1 : 0,
-                    g_paint_after_loop ? 1 : 0);
+
         }
     }
 }
@@ -980,7 +977,7 @@ void TryHookSwapChain(IDXGISwapChain* sc) {
     }
     g_swap = sc;
     g_swap->AddRef();
-    LogInfo("world-map HD: hooked SwapChain Present");
+
 }
 
 void FindSwapChain() {
@@ -1110,7 +1107,7 @@ void WrapContext(ID3D11DeviceContext* ctx) {
     g_ctx = ctx;
     g_ctx->AddRef();
     g_wrapped_ctx = true;
-    LogInfo("world-map HD: hooked SoftHD D3D Draw");
+
     FindSwapChain();
 }
 
@@ -1127,7 +1124,7 @@ void WrapDevice(ID3D11Device* dev) {
         g_device = dev;
         g_device->AddRef();
         g_wrapped_dev = true;
-        LogInfo("world-map HD: hooked CreateTexture2D");
+
     }
     if (!g_wrapped_ctx) {
         ID3D11DeviceContext* ctx = nullptr;
@@ -1213,7 +1210,7 @@ bool HookCreateDeviceIat() {
     *slot = reinterpret_cast<void*>(&HookCreateDeviceAndSwap);
     VirtualProtect(slot, sizeof(void*), old, &old);
     g_create_device_iat = slot;
-    LogInfo("world-map HD: D3D11CreateDeviceAndSwapChain IAT hooked");
+
     return true;
 }
 
@@ -1328,8 +1325,7 @@ void SetWorldMapCustomPicture(int icon, int x, int y, const char* path, int widt
     pic.on = true;
     pic.want_w = width > 0 ? width : 0;
     pic.want_h = height > 0 ? height : 0;
-    LogInfo("world-map custom HD picture icon=%d (SoftHD draw overlay) %s size=%dx%d", icon,
-            pic.path, pic.want_w, pic.want_h);
+
 }
 
 void OnIconSubmit(int icon, int dest_x, int dest_y, int dest_w, int dest_h) {
@@ -1352,8 +1348,7 @@ void OnIconSubmit(int icon, int dest_x, int dest_y, int dest_w, int dest_h) {
     CacheSoftHdNdc();
     if (g_submit_logs < 6) {
         ++g_submit_logs;
-        LogInfo("world-map HD: icon=%d dest=(%d,%d %dx%d) virt=%dx%d skip_adj=%u xoff=%.1f", icon,
-                dest_x, dest_y, dest_w, dest_h, g_virt_sw, g_virt_sh, g_skip_adjust, g_x_off);
+
     }
     TryWrapExistingDevice();
     FindSwapChain();
@@ -1366,7 +1361,7 @@ bool InstallWorldMapPictureHook() {
 #else
     HookCreateDeviceIat();
     TryWrapExistingDevice();
-    LogInfo("world-map picture hook: SoftHD Draw overlay (no hash / no atlas write)");
+
     return g_create_device_iat != nullptr || g_wrapped_dev;
 #endif
 }

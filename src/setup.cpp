@@ -18,6 +18,27 @@ LONG CALLBACK CrashLogVeh(EXCEPTION_POINTERS* info) {
     if (code != 0xC0000005 && code != 0xC000001D && code != 0xC00000FD) {
         return EXCEPTION_CONTINUE_SEARCH;
     }
+
+    // First-chance AVs from SafeRead / other SEH in this DLL. Logging them
+    // fopen+fflush's GrandiaMod.log on the hot path and stalls the game.
+    MEMORY_BASIC_INFORMATION fault_mbi{};
+    MEMORY_BASIC_INFORMATION self_mbi{};
+    const void* fault_at = info->ExceptionRecord->ExceptionAddress;
+    if (VirtualQuery(fault_at, &fault_mbi, sizeof(fault_mbi)) != 0 &&
+        VirtualQuery(reinterpret_cast<void*>(&CrashLogVeh), &self_mbi, sizeof(self_mbi)) != 0 &&
+        fault_mbi.AllocationBase != nullptr &&
+        fault_mbi.AllocationBase == self_mbi.AllocationBase) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    static volatile LONG s_av_logs = 0;
+    const LONG seen = InterlockedIncrement(&s_av_logs);
+    if (seen == 16) {
+        LogWarn("AV logger silenced after 16 reports");
+    }
+    if (seen > 16) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
     const auto base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
     const auto at = reinterpret_cast<std::uintptr_t>(info->ExceptionRecord->ExceptionAddress);
     const auto* ctx = info->ContextRecord;
@@ -58,7 +79,6 @@ LONG CALLBACK CrashLogVeh(EXCEPTION_POINTERS* info) {
 
 bool InstallSetupHooks() {
     AddVectoredExceptionHandler(1, &CrashLogVeh);
-    LogInfo("AV logger on; stock travel (no dest intercept)");
     return true;
 }
 

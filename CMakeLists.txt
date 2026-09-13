@@ -14,6 +14,9 @@ add_library(GrandiaMod SHARED
     src/log.cpp
     src/overlay.cpp
     src/virt_file.cpp
+    src/hd_texture.cpp
+    src/hd_match.cpp
+    src/hd_draw.cpp
     src/map_apply.cpp
     src/script_redirect.cpp
     src/dialogue.cpp
@@ -22,16 +25,19 @@ add_library(GrandiaMod SHARED
     src/hook_util.cpp
     src/events.cpp
     src/game.cpp
+    src/field_run.cpp
     src/travel.cpp
     src/wm_picture.cpp
     src/save.cpp
     src/party.cpp
     src/party_pdat.cpp
     src/qol.cpp
+    src/xp.cpp
     src/d3d_hud.cpp
     src/title.cpp
     src/catalog.cpp
     src/movie_skip.cpp
+    src/menu.cpp
 )
 
 target_include_directories(GrandiaMod PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)

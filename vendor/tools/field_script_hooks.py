@@ -721,7 +721,9 @@ def decode_hook_payload(handler_type: int, raw: bytes, *, row_size: int) -> dict
             "followHookId": raw[0x13] or None,
         }
         if subtype == 8:
-            # instance_facing: talk id + facing index via +0x897D0 / 0x600918.
+            # instance_facing (+0x78691): [+5]&1 selects the actor.
+            # 1 → +6 TalkId via +0x897D0; 0 → party grid [0x71CD28]+2 vs +6.
+            # +7 = facing 0..7 through LUT 0x600918. Only bit 0 of +5 is read.
             decoded_1d.update(
                 {
                     "useTalkId": bool(raw[5] & 1),
@@ -781,8 +783,18 @@ def decode_hook_payload(handler_type: int, raw: bytes, *, row_size: int) -> dict
         return out
 
     if handler_type == 0x10:
-        # +0x755A0 → +0x7A1A0 looks up animId in [0x71CAE0]/[0x71C1B4],
-        # then latches onto actor slot matching unitKey at [0x71A740].
+        # +0x755A0 → +0x7A1A0 looks up animId in [0x71CAE0] (sec[21]
+        # directory: u16 count, then {u16 id, u16 flags, u32 off_a, u32 off_b})
+        # then fallback [0x71C1B4] (shared bank from [0x63FA50]+0x18).
+        # Clip streams are those offsets, not sec[8]. Slot table [0x71A740].
+        # SDK e.Map.Anims is this directory; shared-bank ids are not listed.
+        # Dirty emit mallocs and swaps [0x71CAE0] after +0x54A9C / +0x54CB1.
+        # flags = Stream A frame count. A = u16 header + N*s16 xyz (mode 2 → NPC).
+        # A header lo==0 skips facing; mode 1 stores the byte, gait 2 if >=6.
+        # B = u16 count + {u16 frame, u16 cmd}. cmd>>14: 0/1/2 = call_hook
+        # table 1/2/3 (id = cmd&0x3FFF); 3 = delay (71A748 countdown, -1/tick).
+        # Tick +0x79E20.
+        # latchMode 2: unitKey is the NPC TalkId (sec[8]+3). mode 0/1 is not.
         b4 = raw[4]
         out.update(
             {
