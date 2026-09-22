@@ -170,7 +170,9 @@ bool g_saw_fight_spawn = false;
 std::uint8_t g_last_battle_mode = 0xFFu;
 bool g_spawn_hooks_ok = false;
 bool g_cull_on = false;
+bool g_attach_needed = false;
 bool g_attach_linked = false;
+bool g_attach_bound = false;
 bool g_attach_body_inited = false;
 bool g_attach_scripts_copied = false;
 bool g_catalog_scripts_logged = false;
@@ -281,7 +283,9 @@ bool IsBattleMode(std::uint8_t mode);
 void WriteUiPartyCache(std::uintptr_t cache_rva, const std::uint8_t* ids, int n);
 void SetBattleCullPatches(bool enable);
 void LinkAttachedEnemies(bool game_thread);
+void NoteAttachCompositionChanged();
 void KeepAttachParent();
+void BindAttachParent();
 void ClearAttachParent();
 void MarkAttachBody();
 void TryInitAttachBody();
@@ -619,9 +623,6 @@ void PollPartyRestore(bool field_map_fopen) {
     }
     const bool in_battle = IsBattleMode(mode);
     const bool was_battle = IsBattleMode(g_last_battle_mode);
-    if (in_battle) {
-        LinkAttachedEnemies(false);
-    }
     if (in_battle && g_staged) {
         SetBattleCullPatches(true);
     }
@@ -955,7 +956,9 @@ void CopyAttachScriptTables(std::uint8_t* ctx, const std::uint8_t* old_species) 
 }
 
 void ClearAttachParent() {
+    g_attach_needed = false;
     g_attach_linked = false;
+    g_attach_bound = false;
     g_attach_body_inited = false;
     g_attach_scripts_copied = false;
     g_catalog_scripts_logged = false;
@@ -1126,14 +1129,36 @@ void CopyAttachSkeletons() {
     }
 }
 
+bool AttachBodyAlive() {
+    if (!g_attach_parent_ptr || !PtrReadable(g_attach_parent_ptr, 0x102u)) {
+        return false;
+    }
+    std::int16_t hp = 0;
+    std::memcpy(&hp, static_cast<std::uint8_t*>(g_attach_parent_ptr) + 0x100, 2);
+    return hp > 0;
+}
+
 void KeepAttachParent() {
     if (!g_attach_parent_ptr) {
+        return;
+    }
+    // Vanilla Squid King / Kraken already own this table. Pinning the body
+    // every poll (or after it dies) keeps the combatant slot occupied and
+    // the fight never ends.
+    if (!AttachBodyAlive()) {
         return;
     }
     void* ctxp = nullptr;
     if (SafeReadPointer(ModuleBase() + kBattleCtxPtrRva, &ctxp) && ctxp &&
         PtrReadable(ctxp, 0x251u)) {
         static_cast<std::uint8_t*>(ctxp)[0x250] = g_attach_parent_id;
+    }
+}
+
+void BindAttachParent() {
+    KeepAttachParent();
+    if (!AttachBodyAlive()) {
+        return;
     }
     const auto base = ModuleBase();
     auto* table = reinterpret_cast<std::uint8_t*>(base + kCombatantTableRva);
@@ -1145,11 +1170,23 @@ void KeepAttachParent() {
     AssignAttachPartParents();
     CopyAttachSkeletons();
     MarkAttachBody();
+    g_attach_bound = true;
+}
+
+void NoteAttachCompositionChanged() {
+    g_attach_needed = true;
 }
 
 void LinkAttachedEnemies(bool game_thread) {
+    if (!g_attach_needed) {
+        return;
+    }
     if (g_attach_linked) {
-        KeepAttachParent();
+        if (!g_attach_bound) {
+            BindAttachParent();
+        } else {
+            KeepAttachParent();
+        }
         if (game_thread) {
             TryInitAttachBody();
         }
@@ -1270,7 +1307,7 @@ void LinkAttachedEnemies(bool game_thread) {
     g_attach_linked = true;
     g_attach_parent_id = body_id;
     g_attach_parent_ptr = body;
-    KeepAttachParent();
+    BindAttachParent();
     if (game_thread) {
         TryInitAttachBody();
     }
@@ -2377,6 +2414,9 @@ void OnBattleSetup() {
         std::memcmp(slots0, req.encounter + kBattleEncounterHeader, sizeof(slots0)) != 0;
     if (write_table || write_approach || write_count || write_slot) {
         WriteBattleSetupEncounter(&req, write_table, write_approach, write_count, write_slot);
+        if (write_count || write_slot) {
+            NoteAttachCompositionChanged();
+        }
     }
 }
 
@@ -2545,9 +2585,11 @@ void OnBattleLoad() {
     if (std::memcmp(slots_orig, req.encounter + kBattleEncounterHeader, sizeof(slots_orig)) != 0 ||
         req.encounter[6] != count0) {
         WriteBattleLoadEncounter(&req);
+        NoteAttachCompositionChanged();
     }
     if (std::memcmp(spec_orig, req.species, 16) != 0) {
         WriteBattleSpeciesMap(&req);
+        NoteAttachCompositionChanged();
     }
 
     std::uint8_t want[4]{};

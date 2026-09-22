@@ -143,7 +143,10 @@ public sealed class MdpSec7
         return outp;
     }
 
-    /// <summary>Apply dirty <see cref="Map.Hooks"/> / <see cref="Map.Zones"/> onto a vanilla sec[7].</summary>
+    /// <summary>
+    /// Apply dirty <see cref="Map.Hooks"/> / <see cref="Map.AltHooks"/> /
+    /// <see cref="Map.Zones"/> onto a vanilla sec[7].
+    /// </summary>
     public static byte[] Apply(ReadOnlySpan<byte> vanilla, Map map)
     {
         var tables = Parse(vanilla);
@@ -184,25 +187,31 @@ public sealed class MdpSec7
         tables.Zones.Clear();
         tables.Zones.AddRange(zoneRows);
 
-        foreach (var hook in map.Hooks.Items.Where(h => h.Dirty && !string.IsNullOrWhiteSpace(h.Line)))
+        ApplyHookRows(tables.Hooks, map.Hooks.Items, "table 2");
+        ApplyHookRows(tables.AltHooks, map.AltHooks.Items, "table 3");
+
+        return tables.Emit();
+    }
+
+    private static void ApplyHookRows(List<byte[]> rows, IEnumerable<Hook> hooks, string tableName)
+    {
+        foreach (var hook in hooks.Where(h => h.Dirty && !string.IsNullOrWhiteSpace(h.Line)))
         {
             var raw = FieldHookAsm.AssembleHook(hook.Line!, hook.Id);
             if (hook.Append)
             {
-                if (tables.Hooks.Count >= 255)
+                if (rows.Count >= 255)
                 {
-                    throw new InvalidOperationException("table 2 count would exceed 255");
+                    throw new InvalidOperationException($"{tableName} count would exceed 255");
                 }
 
-                tables.Hooks.Add(raw);
+                rows.Add(raw);
             }
             else
             {
-                tables.Hooks[MatchHook(tables.Hooks, hook.Id)] = raw;
+                rows[MatchHook(rows, hook.Id, tableName)] = raw;
             }
         }
-
-        return tables.Emit();
     }
 
     private static int MatchZone(IReadOnlyList<byte[]> rows, int dest)
@@ -230,7 +239,7 @@ public sealed class MdpSec7
         return hits[0];
     }
 
-    private static int MatchHook(IReadOnlyList<byte[]> rows, int hookId)
+    private static int MatchHook(IReadOnlyList<byte[]> rows, int hookId, string tableName)
     {
         var hits = new List<int>();
         for (var i = 0; i < rows.Count; i++)
@@ -243,12 +252,12 @@ public sealed class MdpSec7
 
         if (hits.Count == 0)
         {
-            throw new InvalidOperationException($"no table-2 hook id {hookId}");
+            throw new InvalidOperationException($"no {tableName} hook id {hookId}");
         }
 
         if (hits.Count > 1)
         {
-            throw new InvalidOperationException($"{hits.Count} table-2 rows have id {hookId}");
+            throw new InvalidOperationException($"{hits.Count} {tableName} rows have id {hookId}");
         }
 
         return hits[0];

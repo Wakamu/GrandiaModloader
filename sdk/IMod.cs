@@ -15,7 +15,8 @@ public interface IMod
     /// <see cref="MapLoadEvent.Map"/>; do not return a new map. Assembled
     /// scripts and hooks are delivered by redirecting <see cref="OnScriptExecute"/>
     /// / <see cref="OnCallHook"/> — the host does not remap fopen. Scripts,
-    /// hooks, and zones assemble in-process (no <c>field_tools</c>). Do not
+    /// hooks, alt hooks (<see cref="Map.AltHooks"/>, <c>call_hook N alt</c>),
+    /// and zones assemble in-process (no <c>field_tools</c>). Do not
     /// rewrite dest-cam / sec[32]. <see cref="Map.Sfx"/> is sec[29]
     /// positional beds (same lazy hydrate as <see cref="Map.Zones"/>);
     /// mutate / <see cref="Map.AddSfx"/> / <see cref="MapSfx.Remove"/> write
@@ -33,10 +34,24 @@ public interface IMod
     /// Ids missing there are the shared bank.
     /// <see cref="MapAnim.SetFrames"/> / <see cref="MapAnim.SetCues"/> /
     /// <see cref="Map.AddAnim"/> emit and swap <c>[0x71CAE0]</c> after bind.
-    /// <see cref="Map.SpriteClips"/> / <see cref="Map.Poses"/> are this
-    /// map's sec[23] character sprite bank (clip id + timed poses; parts
-    /// carry channel + sprite cookie). Play with
-    /// <c>unit_bind {clipId} {talkId}</c> (field_talk). Read-only — no emit.
+    /// <see cref="Map.CameraPaths"/> is this map's sec[15] camera-path
+    /// directory (1-based id; <c>camera_path {id}</c> / hook <c>+5</c>).
+    /// <see cref="MapCameraPath.Replace"/> / <see cref="MapCameraPath.ToAsm"/>
+    /// / <see cref="Map.AddCameraPath(string)"/> use the sec[15] dump
+    /// mnemonics (<c>set_pos</c>, <c>wait_b</c>, …). Emit swaps
+    /// <c>[0x71A644]</c> after bind. Removed ids stay as
+    /// <c>0xFF</c> stubs. <see cref="Map.Camera"/> is this map's
+    /// sec[10] camera params (mode 0–3, pitch reset, Select pan AABB,
+    /// Select height <see cref="MapSelectPan.Distance"/> (p28, stock 0.25),
+    /// minimap clip at +0xE4/+0xE8, follow-cam / proj words). Dirty fields write the live
+    /// field-params heap at <c>[0x63FA9C]</c> after the field-setup
+    /// word-copy; Select pan also pokes <c>713F44/3E/40/42</c>; Distance
+    /// substitutes the Select-enter p28 write (script 0 +0x20).
+    /// <see cref="Map.SpriteClips"/> /
+    /// <see cref="Map.Poses"/> are this map's sec[23] character sprite
+    /// bank (clip id + timed poses; parts carry channel + sprite cookie).
+    /// Play with <c>unit_bind {clipId} {talkId}</c> (field_talk).
+    /// Read-only — no emit.
     /// <see cref="Map.Textures"/> is the original PS1 TIM (sec[1]/[27]).
     /// Crop a pose part with <c>e.Map.Textures.TryCrop(part, out var tim)</c>
     /// or an HD row with <c>e.Map.TryCrop(e.Map.Sprites.Anim[7], out tim)</c>.
@@ -68,8 +83,8 @@ public interface IMod
     /// <summary>
     /// <c>call_hook</c> lookup at <c>+0x53560</c>. Prefills
     /// <see cref="CallHookEvent.Row"/> from this map's OnMapLoad hook rows.
-    /// Call <see cref="CallHookEvent.Replace"/> with a table-2 assembler line
-    /// (e.g. <c>hook 888 setup dest=0xCC15 spawn=1</c>), set a 20-byte
+    /// Call <see cref="CallHookEvent.Replace"/> with a table-2 / table-3
+    /// assembler line (e.g. <c>hook 888 setup dest=0xCC15 spawn=1</c>), set a 20-byte
     /// <see cref="CallHookEvent.Row"/>, or <see cref="CallHookEvent.Skip"/> to drop.
     /// Assemble is in-process C# (no <c>field_tools</c>).
     /// </summary>
@@ -237,7 +252,7 @@ public interface IMod
     /// <summary>
     /// About 60 Hz. Poll <see cref="TickEvent.Pad"/> / <see cref="Game.Input"/>
     /// and drive <see cref="Game.Turbo"/>, <see cref="Game.Encounters"/>,
-    /// <see cref="Game.Debug"/>, <see cref="Game.Menu"/>, and <see cref="Game.Ui"/>. Set <see cref="TickEvent.BlockGameInput"/> to
+    /// <see cref="Game.Debug"/>, <see cref="Game.Compass"/>, <see cref="Game.Menu"/>, and <see cref="Game.Ui"/>. Set <see cref="TickEvent.BlockGameInput"/> to
     /// swallow this pad update so the game does not walk, open pause,
     /// or move the title New Game / Continue / Options cursor.
     /// </summary>

@@ -12,6 +12,7 @@
 #include <cstring>
 
 extern "C" int ModFlagGet(unsigned event_id);
+extern "C" int ModFlagSet(unsigned event_id, int value);
 extern "C" int ModMenuIsOpen();
 extern "C" int ModMenuClose();
 extern "C" std::uint8_t g_mod_wm_picture[32] = {
@@ -205,6 +206,12 @@ void ExpandStockToWide() {
         return;
     }
     std::memset(g_wide, 0, kWideTotal);
+    if (g_cursor) {
+        std::memset(g_cursor, 0xFF, kWideCursor);
+    }
+    if (g_nav) {
+        std::memset(g_nav, 0xFF, kWideNav);
+    }
     for (int set = 0; set < kSets; ++set) {
         std::memcpy(g_dest + set * kDestPerSet * 4, g_tables.dest + set * kStockDestPerSet * 4,
                     kStockDestPerSet * 4);
@@ -578,53 +585,68 @@ int Dist2(int x0, int y0, int x1, int y1) {
     return dx * dx + dy * dy;
 }
 
-void RebuildAccessibleNav(std::uint8_t* nav, const std::uint8_t* xy, const std::uint8_t* flags,
-                          const std::uint8_t* visited) {
+void FillNavDir(std::uint8_t* nav, const int* xs, const int* ys, const bool* land, int icon) {
+    if (icon < 0 || icon >= kSlots || !land[icon]) {
+        return;
+    }
+    for (int dir = 0; dir < 4; ++dir) {
+        int best = -1;
+        int best_d = 0x7fffffff;
+        for (int j = 0; j < kSlots; ++j) {
+            if (j == icon || !land[j]) {
+                continue;
+            }
+            const int dx = xs[j] - xs[icon];
+            const int dy = ys[j] - ys[icon];
+            if (dir == 0 && dy >= 0) {
+                continue;
+            }
+            if (dir == 1 && dy <= 0) {
+                continue;
+            }
+            if (dir == 2 && dx >= 0) {
+                continue;
+            }
+            if (dir == 3 && dx <= 0) {
+                continue;
+            }
+            const int d = Dist2(xs[icon], ys[icon], xs[j], ys[j]);
+            if (d < best_d || (d == best_d && (best < 0 || j < best))) {
+                best_d = d;
+                best = j;
+            }
+        }
+        if (best >= 0) {
+            nav[icon * 4 + dir] = static_cast<std::uint8_t>(best);
+        }
+    }
+}
+
+void SpliceAddedIconNav(std::uint8_t* nav, const std::uint8_t* xy, const std::uint8_t* flags,
+                        const bool* added) {
+    // Stock D-pad links stay as-is. Rebuilding the whole graph from "both
+    // flags set" isolated New Parm and made every other pin look reachable.
     bool land[kSlots]{};
     int xs[kSlots]{};
     int ys[kSlots]{};
     for (int i = 0; i < kSlots; ++i) {
         xs[i] = static_cast<std::int16_t>(ReadU16(xy + i * 4));
         ys[i] = static_cast<std::int16_t>(ReadU16(xy + i * 4 + 2));
-        land[i] = IconLandable(ReadU16(flags + i * 2), ReadU16(visited + i * 2));
-        nav[i * 4 + 0] = 0xFF;
-        nav[i * 4 + 1] = 0xFF;
-        nav[i * 4 + 2] = 0xFF;
-        nav[i * 4 + 3] = 0xFF;
+        land[i] = ReadU16(flags + i * 2) != 0;
     }
     for (int i = 0; i < kSlots; ++i) {
-        if (!land[i]) {
+        if (!added[i] || !land[i]) {
             continue;
         }
+        FillNavDir(nav, xs, ys, land, i);
         for (int dir = 0; dir < 4; ++dir) {
-            int best = -1;
-            int best_d = 0x7fffffff;
-            for (int j = 0; j < kSlots; ++j) {
-                if (j == i || !land[j]) {
-                    continue;
-                }
-                const int dx = xs[j] - xs[i];
-                const int dy = ys[j] - ys[i];
-                if (dir == 0 && dy >= 0) {
-                    continue;
-                }
-                if (dir == 1 && dy <= 0) {
-                    continue;
-                }
-                if (dir == 2 && dx >= 0) {
-                    continue;
-                }
-                if (dir == 3 && dx <= 0) {
-                    continue;
-                }
-                const int d = Dist2(xs[i], ys[i], xs[j], ys[j]);
-                if (d < best_d || (d == best_d && (best < 0 || j < best))) {
-                    best_d = d;
-                    best = j;
-                }
+            const int other = nav[i * 4 + dir];
+            if (other < 0 || other >= kSlots) {
+                continue;
             }
-            if (best >= 0) {
-                nav[i * 4 + dir] = static_cast<std::uint8_t>(best);
+            const int back = dir ^ 1;
+            if (nav[other * 4 + back] == 0xFF) {
+                nav[other * 4 + back] = static_cast<std::uint8_t>(i);
             }
         }
     }
@@ -777,9 +799,15 @@ void ApplyDests(std::uintptr_t base, int set_id, int amap, const WorldMapLoadNat
         }
         WriteI16(xy_bytes + icon * 4, req.x[i]);
         WriteI16(xy_bytes + icon * 4 + 2, req.y[i]);
-        const std::uint16_t bit = req.revealed[i] ? kRevealBit : 0;
-        WriteU16(flag_bytes + icon * 2, bit);
-        WriteU16(visited_bytes + icon * 2, req.accessible[i] ? kVisitedBit : 0);
+        const auto flag_id = ReadU16(flag_bytes + icon * 2);
+        const auto visited_id = ReadU16(visited_bytes + icon * 2);
+        if (flag_id != 0 && req.revealed[i] != (before_i >= 0 ? before.revealed[before_i] : 0)) {
+            ModFlagSet(flag_id, req.revealed[i] ? 1 : 0);
+        }
+        if (visited_id != 0 &&
+            req.accessible[i] != (before_i >= 0 ? before.accessible[before_i] : 0)) {
+            ModFlagSet(visited_id, req.accessible[i] ? 1 : 0);
+        }
     }
 
     for (int i = 0; i < before.count && i < kSlots; ++i) {
@@ -792,7 +820,7 @@ void ApplyDests(std::uintptr_t base, int set_id, int amap, const WorldMapLoadNat
         WriteU16(visited_bytes + icon * 2, 0);
     }
 
-    RebuildAccessibleNav(nav_bytes, xy_bytes, flag_bytes, visited_bytes);
+    SpliceAddedIconNav(nav_bytes, xy_bytes, flag_bytes, added_icon);
 
     WriteMem(dest, dest_bytes, sizeof(dest_bytes));
     WriteMem(xy, xy_bytes, sizeof(xy_bytes));
@@ -880,27 +908,44 @@ int ReadOriginCtx(std::uintptr_t base) {
 }
 
 void FillFromTables(std::uintptr_t base, int set_id, WorldMapLoadNative* req) {
-    (void)base;
     req->count = 0;
-    if (set_id < 0 || set_id >= kSets || !g_dest || !g_xy) {
+    if (set_id < 0 || set_id >= kSets) {
         return;
     }
     const int origin = req->origin_ctx;
-    const auto* dest = reinterpret_cast<const std::uint16_t*>(g_dest + set_id * kDestPerSet * 4);
-    const auto* xy = reinterpret_cast<const std::int16_t*>(g_xy + set_id * kSlots * 4);
-    const auto* flags = reinterpret_cast<const std::uint16_t*>(g_flags + set_id * kSlots * 2);
-    const auto* visited = reinterpret_cast<const std::uint16_t*>(g_visited + set_id * kSlots * 2);
-    const auto* cursor = g_cursor + set_id * kCursorPerSet;
+    const bool wide = g_wide_patched && g_dest && g_xy && g_flags && g_visited && g_cursor;
+    const int dest_stride = wide ? kDestPerSet : kStockDestPerSet;
+    const int icon_n = wide ? kSlots : kStockSlots;
+    const int cursor_stride = wide ? kSlots : kStockSlots;
+    const int cursor_per_set = wide ? kCursorPerSet : kStockCursorPerSet;
+    const auto* dest = reinterpret_cast<const std::uint16_t*>(
+        wide ? g_dest + set_id * kDestPerSet * 4
+             : reinterpret_cast<std::uint8_t*>(base + kDestTableRva) + set_id * kStockDestPerSet * 4);
+    const auto* xy = reinterpret_cast<const std::int16_t*>(
+        wide ? g_xy + set_id * kSlots * 4
+             : reinterpret_cast<std::uint8_t*>(base + kXyTableRva) + set_id * kStockSlots * 4);
+    const auto* flags = reinterpret_cast<const std::uint16_t*>(
+        wide ? g_flags + set_id * kSlots * 2
+             : reinterpret_cast<std::uint8_t*>(base + kFlagTableRva) + set_id * kStockSlots * 2);
+    const auto* visited = reinterpret_cast<const std::uint16_t*>(
+        wide ? g_visited + set_id * kSlots * 2
+             : reinterpret_cast<std::uint8_t*>(base + kVisitedTableRva) + set_id * kStockSlots * 2);
+    const auto* cursor =
+        wide ? g_cursor + set_id * kCursorPerSet
+             : reinterpret_cast<const std::uint8_t*>(base + kCursorTableRva) + set_id * cursor_per_set;
+    if (origin < 0 || origin >= dest_stride) {
+        return;
+    }
     const auto hub = dest[0];
-    for (int icon = 0; icon < kSlots; ++icon) {
+    for (int icon = 0; icon < icon_n; ++icon) {
         const auto flag = flags[icon];
         if (flag == 0) {
             continue;
         }
-        const auto vis = cursor[origin * kSlots + icon];
+        const auto vis = cursor[origin * cursor_stride + icon];
         std::uint16_t map = 0;
         std::uint16_t aux = 0;
-        if (vis != 0xFF && vis < kDestPerSet) {
+        if (vis != 0xFF && vis < dest_stride) {
             map = dest[vis * 2];
             aux = dest[vis * 2 + 1];
         }
@@ -921,9 +966,9 @@ void FillFromTables(std::uintptr_t base, int set_id, WorldMapLoadNative* req) {
         if (map != 0) {
             seen[seen_n++] = map;
         }
-        for (int ctx = 0; ctx < kDestPerSet && extra_n < 4; ++ctx) {
-            const auto v = cursor[ctx * kSlots + icon];
-            if (v == 0xFF || v >= kDestPerSet) {
+        for (int ctx = 0; ctx < dest_stride && extra_n < 4; ++ctx) {
+            const auto v = cursor[ctx * cursor_stride + icon];
+            if (v == 0xFF || v >= dest_stride) {
                 continue;
             }
             const auto other = dest[v * 2];
@@ -1084,10 +1129,6 @@ void OnWorldMapLoad() {
                  kIconCountPatchSize);
     }
     ClearWorldMapCustomPictures();
-    if (!InstallWideTables(base)) {
-        LogWarn("OnWorldMapLoad: 32-slot tables unavailable; stock 16-icon map only");
-        return;
-    }
 
     const int amap = ComputeAmapIndex(base);
     int set_id = ReadSetId(base, amap);
@@ -1106,6 +1147,10 @@ void OnWorldMapLoad() {
         return;
     }
     if (req.dirty == 0) {
+        return;
+    }
+    if (!InstallWideTables(base)) {
+        LogWarn("OnWorldMapLoad: 32-slot tables unavailable; stock 16-icon map only");
         return;
     }
     RestoreTables(base);

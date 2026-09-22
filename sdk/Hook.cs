@@ -25,7 +25,7 @@ public sealed class Hook
 
     public bool Dirty { get; set; }
 
-    /// <summary>True = table-2 <c>add</c>; false = <c>replace id=</c>.</summary>
+    /// <summary>True = append a new row; false = <c>replace id=</c>.</summary>
     public bool Append { get; set; }
 
     internal void HydrateLine(string line)

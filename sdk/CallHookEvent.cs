@@ -39,7 +39,7 @@ public sealed class CallHookEvent
     public bool Skip { get; set; }
 
     /// <summary>
-    /// Stop the vanilla hook and run this table-2 assembler line instead.
+    /// Stop the vanilla hook and run this assembler line instead.
     /// Assembled in-process (no <c>field_tools</c>).
     /// </summary>
     public void Replace(string assembler)

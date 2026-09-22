@@ -65,6 +65,8 @@ struct HostApiNative {
     int(__cdecl* quit)();
     int(__cdecl* xp_get)(int kind);
     int(__cdecl* xp_set)(int kind, int multiplier);
+    int(__cdecl* compass_get)();
+    int(__cdecl* compass_set)(int visible);
 };
 
 bool InstallGameServices();

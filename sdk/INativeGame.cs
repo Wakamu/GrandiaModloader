@@ -62,4 +62,6 @@ internal interface INativeGame
     int Quit();
     int XpGet(int kind);
     int XpSet(int kind, int multiplier);
+    int CompassGet();
+    int CompassSet(int visible);
 }

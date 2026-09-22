@@ -12,6 +12,7 @@ public sealed class Map
         Id = id;
         Stem = id.ToString();
         Hooks = new HookTable();
+        AltHooks = new HookTable();
         Zones = new ZoneTable();
         Sfx = new MapSfxTable();
         Npcs = new MapNpcTable();
@@ -20,6 +21,8 @@ public sealed class Map
         Poses = new MapSpritePoseTable();
         Sprites = new MapSpriteBank();
         Textures = new MapTextureTable();
+        CameraPaths = new MapCameraPathTable();
+        Camera = new MapCamera();
     }
 
     public Map(string stem)
@@ -27,6 +30,7 @@ public sealed class Map
         Stem = stem.Trim().ToUpperInvariant();
         Id = MapId.Parse(Stem);
         Hooks = new HookTable();
+        AltHooks = new HookTable();
         Zones = new ZoneTable();
         Sfx = new MapSfxTable();
         Npcs = new MapNpcTable();
@@ -35,6 +39,8 @@ public sealed class Map
         Poses = new MapSpritePoseTable();
         Sprites = new MapSpriteBank();
         Textures = new MapTextureTable();
+        CameraPaths = new MapCameraPathTable();
+        Camera = new MapCamera();
     }
 
     public MapId Id { get; }
@@ -42,6 +48,13 @@ public sealed class Map
     public string Stem { get; }
 
     public HookTable Hooks { get; }
+
+    /// <summary>
+    /// Sec[7] table 3 (<c>call_hook N alt</c>). Same 20-byte rows /
+    /// <see cref="Hook.Line"/> as <see cref="Hooks"/>. Ids are per-table:
+    /// hook 5 and alt hook 5 can both exist.
+    /// </summary>
+    public HookTable AltHooks { get; }
 
     public ZoneTable Zones { get; }
 
@@ -70,6 +83,30 @@ public sealed class Map
     /// <c>[0x71CAE0]</c> after bind.
     /// </summary>
     public MapAnimTable Anims { get; }
+
+    /// <summary>
+    /// This map's sec[15] camera-path directory (1-based id + bytecode).
+    /// Same lazy fopen hydrate as <see cref="Zones"/>. Play with
+    /// <c>camera_path {id}</c> (BA38 hook 27 is id 1). The engine
+    /// <c>dec</c>s the id and reads a self-relative u32 into IP
+    /// <c>[0x719934]</c>. Dirty rows are emitted and swapped onto
+    /// <c>[0x71A644]</c> after bind. Removed ids stay as <c>0xFF</c>
+    /// stubs so <c>camera_path N</c> numbers do not shift.
+    /// Edit with <see cref="MapCameraPath.Replace"/> / <see cref="MapCameraPath.ToAsm"/>.
+    /// </summary>
+    public MapCameraPathTable CameraPaths { get; }
+
+    /// <summary>
+    /// This map's sec[10] camera params (mode, pitch reset, Select pan
+    /// AABB, Select height via <see cref="MapSelectPan.Distance"/>,
+    /// minimap clip at +0xE4/+0xE8, follow-cam / proj words).
+    /// Same lazy fopen hydrate as
+    /// <see cref="Zones"/>. Dirty fields write the live field-params
+    /// heap at <c>[0x63FA9C]</c> after the field-setup word-copy.
+    /// Select pan also pokes <c>713F44/3E/40/42</c>; Distance hooks the
+    /// Select-enter p28 write (<c>+0x7D028</c> / script 0 +0x20).
+    /// </summary>
+    public MapCamera Camera { get; }
 
     /// <summary>
     /// This map's sec[23] sprite-clip directory (id + timed pose frames).
@@ -148,7 +185,8 @@ public sealed class Map
     }
 
     public bool Dirty =>
-        _scripts.Values.Any(s => s.Dirty) || Hooks.Dirty || Zones.Dirty || Sfx.Dirty || Npcs.Dirty || Anims.Dirty;
+        _scripts.Values.Any(s => s.Dirty) || Hooks.Dirty || AltHooks.Dirty || Zones.Dirty ||
+        Sfx.Dirty || Npcs.Dirty || Anims.Dirty || CameraPaths.Dirty || Camera.Dirty;
 
     public Script GetScript(int id)
     {
@@ -205,6 +243,9 @@ public sealed class Map
     /// <summary>First unused table-2 hook id on this map (1–255).</summary>
     public int NextHookId() => Hooks.NextId();
 
+    /// <summary>First unused table-3 alt-hook id on this map (1–255).</summary>
+    public int NextAltHookId() => AltHooks.NextId();
+
     /// <summary>
     /// Append a table-2 row. Omit <paramref name="id"/> to take the first unused id.
     /// The <c>hook N</c> token in <paramref name="line"/> is rewritten to match.
@@ -220,6 +261,29 @@ public sealed class Map
     }
 
     public Hook AddHook(int id, string line) => AddHook(line, id);
+
+    /// <summary>
+    /// Append a table-3 row (<c>call_hook {id} alt</c>). Omit
+    /// <paramref name="id"/> to take the first unused alt id. Same assembler
+    /// grammar as <see cref="AddHook"/>.
+    /// </summary>
+    public Hook AddAltHook(string line, int? id = null)
+    {
+        var hid = id ?? AltHooks.NextId();
+        var hook = AltHooks.Add(hid);
+        hook.Line = FieldHookAsm.NormalizeHookLine(line, hid);
+        return hook;
+    }
+
+    public Hook AddAltHook(int id, string line) => AddAltHook(line, id);
+
+    /// <summary>Replace an existing table-3 row by id.</summary>
+    public Hook ReplaceAltHook(int id, string line)
+    {
+        var hook = AltHooks.Replace(id);
+        hook.Line = FieldHookAsm.NormalizeHookLine(line, id);
+        return hook;
+    }
 
     /// <summary>
     /// Append a table-1 zone. <paramref name="dest"/> is only the match key for
@@ -310,6 +374,22 @@ public sealed class Map
 
     public void RemoveAnim(int index) => Anims.RemoveAt(index);
 
+    /// <summary>
+    /// Append a sec[15] camera path (or reuse a removed id). Play with
+    /// <c>camera_path {id}</c>.
+    /// </summary>
+    public MapCameraPath AddCameraPath(byte[]? raw = null) => CameraPaths.Add(raw);
+
+    public MapCameraPath AddCameraPath(IEnumerable<MapCameraPathOp> ops) =>
+        CameraPaths.Add(ops);
+
+    public MapCameraPath AddCameraPath(string disassembly) =>
+        CameraPaths.Add(disassembly);
+
+    public void RemoveCameraPath(MapCameraPath row) => row.Remove();
+
+    public void RemoveCameraPath(int index) => CameraPaths.RemoveAt(index);
+
     /// <summary>Replace an existing table-2 row by id.</summary>
     public Hook ReplaceHook(int id, string line)
     {
@@ -362,6 +442,19 @@ public sealed class Map
             sb.AppendLine();
         }
 
+        if (AltHooks.Dirty)
+        {
+            sb.AppendLine("table 3 {");
+            foreach (var hook in AltHooks.Items.Where(h => h.Dirty && !string.IsNullOrWhiteSpace(h.Line)))
+            {
+                sb.AppendLine(hook.Append ? "add" : $"replace id={hook.Id}");
+                sb.AppendLine(hook.Line);
+            }
+
+            sb.AppendLine("}");
+            sb.AppendLine();
+        }
+
         if (Sfx.Dirty)
         {
             sb.AppendLine("sfx {");
@@ -396,6 +489,31 @@ public sealed class Map
                 sb.AppendLine();
             }
 
+            sb.AppendLine("}");
+            sb.AppendLine();
+        }
+
+        if (Camera.Dirty && Camera.Present)
+        {
+            sb.AppendLine("camera {");
+            sb.Append("  mode ").Append((byte)Camera.Mode).AppendLine();
+            sb.Append("  pitch ").Append(Camera.Pitch).AppendLine();
+            sb.Append("  follow ").Append(Camera.Follow).AppendLine();
+            sb.Append("  follow_term 0x").Append(Camera.FollowTerm.ToString("X")).AppendLine();
+            sb.Append("  proj 0x").Append(Camera.ProjA.ToString("X"));
+            sb.Append(" 0x").Append(Camera.ProjB.ToString("X"));
+            sb.Append(" 0x").Append(Camera.ProjC.ToString("X")).AppendLine();
+            sb.Append("  view ").Append(Camera.ViewX).Append(' ')
+                .Append(Camera.ViewY).Append(' ').Append(Camera.ViewZ).AppendLine();
+            sb.Append("  select_pan ").Append(Camera.SelectPan.Enabled ? "on" : "off");
+            sb.Append(" xmin=").Append(Camera.SelectPan.XMin);
+            sb.Append(" zmin=").Append(Camera.SelectPan.ZMin);
+            sb.Append(" xmax=").Append(Camera.SelectPan.XMax);
+            sb.Append(" zmax=").Append(Camera.SelectPan.ZMax);
+            sb.Append(" distance=").Append(Camera.SelectPan.Distance);
+            sb.Append(" clip=").Append(Camera.SelectPan.ClipLo);
+            sb.Append(',').Append(Camera.SelectPan.ClipHi);
+            sb.Append(" scale=").Append(Camera.SelectPan.Scale).AppendLine();
             sb.AppendLine("}");
             sb.AppendLine();
         }

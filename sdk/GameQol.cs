@@ -99,6 +99,24 @@ public sealed class GameEncounters
     }
 }
 
+/// <summary>
+/// Field 3D compass at the top-right. Stock is on. Set
+/// <see cref="Visible"/> false from <c>Init</c> or <c>[OnMapLoad]</c>
+/// so SoftHD never caches the mesh.
+/// </summary>
+public sealed class GameCompass
+{
+    public bool Visible
+    {
+        get => (Game.Native?.CompassGet() ?? 1) > 0;
+        set => Game.Native?.CompassSet(value ? 1 : 0);
+    }
+
+    public void Hide() => Visible = false;
+
+    public void Show() => Visible = true;
+}
+
 /// <summary>Vanilla ASCII debug flag at <c>+0x23F00E</c> ("4000" / "0000"). 9999 damage etc.</summary>
 public sealed class GameDebug
 {

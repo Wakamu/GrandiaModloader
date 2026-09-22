@@ -37,6 +37,8 @@ extern "C" int ModRunField(int kind, int id, int table, const void* bytes, int l
 extern "C" int ModQuit();
 extern "C" int ModXpGet(int kind);
 extern "C" int ModXpSet(int kind, int multiplier);
+extern "C" int ModCompassGet();
+extern "C" int ModCompassSet(int visible);
 extern "C" int ModOverlayInputOpen(const char* title, const char* initial, int max_len);
 extern "C" int ModOverlayInputClose();
 extern "C" int ModOverlayInputActive();
@@ -966,6 +968,8 @@ void FillHostApi(HostApiNative* api) {
     api->quit = &ModQuit;
     api->xp_get = &ModXpGet;
     api->xp_set = &ModXpSet;
+    api->compass_get = &ModCompassGet;
+    api->compass_set = &ModCompassSet;
 }
 
 bool InstallGameServices() {

@@ -161,10 +161,12 @@ public static class ModHost
             if (embedded && packed!.Mdp != null)
             {
                 map.Hooks.SeedOccupied(MdpHookIds.ReadTable2(packed.Mdp));
+                map.AltHooks.SeedOccupied(MdpHookIds.ReadTable3(packed.Mdp));
             }
             else if (Config != null)
             {
                 map.Hooks.SeedOccupied(LoadOccupiedHookIds(stem, Config.Field));
+                map.AltHooks.SeedOccupied(LoadOccupiedAltHookIds(stem, Config.Field));
             }
 
             void HydrateSec7()
@@ -175,6 +177,7 @@ public static class ModHost
 
             map.Zones.Ensure = HydrateSec7;
             map.Hooks.Ensure = HydrateSec7;
+            map.AltHooks.Ensure = HydrateSec7;
             map.Sfx.Ensure = HydrateSec7;
             map.Npcs.Ensure = HydrateSec7;
             map.Anims.Ensure = HydrateSec7;
@@ -182,6 +185,8 @@ public static class ModHost
             map.Poses.Ensure = HydrateSec7;
             map.Sprites.Ensure = HydrateSec7;
             map.Textures.Ensure = HydrateSec7;
+            map.CameraPaths.Ensure = HydrateSec7;
+            map.Camera.Ensure = HydrateSec7;
             map.EnsureEncounters = HydrateSec7;
 
             var cache = string.IsNullOrWhiteSpace(cacheDir)
@@ -226,6 +231,8 @@ public static class ModHost
             byte[] sec29 = [];
             byte[] sec8 = [];
             byte[] sec21 = [];
+            byte[] sec15 = [];
+            byte[] sec10 = [];
             if (map.Sfx.Dirty)
             {
                 sec29 = MdpSec29.Emit(map.Sfx);
@@ -253,7 +260,25 @@ public static class ModHost
                 }
             }
 
-            if (map.Hooks.Dirty || map.Zones.Dirty)
+            if (map.CameraPaths.Dirty)
+            {
+                sec15 = MdpSec15.Emit(map.CameraPaths);
+                if (sec15.Length > MapRamStore.Sec15Budget)
+                {
+                    sec15 = sec15.AsSpan(0, MapRamStore.Sec15Budget).ToArray();
+                }
+            }
+
+            if (map.Camera.Dirty)
+            {
+                sec10 = MdpSec10.Emit(map.Camera);
+                if (sec10.Length > MapRamStore.Sec10Budget)
+                {
+                    sec10 = sec10.AsSpan(0, MapRamStore.Sec10Budget).ToArray();
+                }
+            }
+
+            if (map.Hooks.Dirty || map.AltHooks.Dirty || map.Zones.Dirty)
             {
                 var vanilla = LoadVanillaSec7(stem, Config, embedded ? packed?.Mdp : null);
                 var sec7 = MdpSec7.Apply(vanilla, map);
@@ -262,10 +287,24 @@ public static class ModHost
                     sec7 = sec7.AsSpan(0, MapRamStore.Sec7Budget).ToArray();
                 }
 
-                patch = new MapRamPatch { Sec7 = sec7, Sec29 = sec29, Sec8 = sec8, Sec21 = sec21 };
+                patch = new MapRamPatch
+                {
+                    Sec7 = sec7,
+                    Sec29 = sec29,
+                    Sec8 = sec8,
+                    Sec21 = sec21,
+                    Sec15 = sec15,
+                    Sec10 = sec10,
+                    SelectP28 = map.Camera.Dirty ? map.Camera.SelectPan.P28Raw : 0,
+                };
                 foreach (var hook in map.Hooks.Items.Where(h => h.Dirty && !string.IsNullOrWhiteSpace(h.Line)))
                 {
                     patch.SetHook(hook.Id, FieldHookAsm.AssembleHook(hook.Line!, hook.Id));
+                }
+
+                foreach (var hook in map.AltHooks.Items.Where(h => h.Dirty && !string.IsNullOrWhiteSpace(h.Line)))
+                {
+                    patch.SetAltHook(hook.Id, FieldHookAsm.AssembleHook(hook.Line!, hook.Id));
                 }
             }
             else
@@ -284,6 +323,18 @@ public static class ModHost
                 {
                     patch.Sec21 = sec21;
                 }
+
+                if (sec15.Length > 0)
+                {
+                    patch.Sec15 = sec15;
+                }
+
+                if (sec10.Length > 0)
+                {
+                    patch.Sec10 = sec10;
+                }
+
+                patch.SelectP28 = map.Camera.Dirty ? map.Camera.SelectPan.P28Raw : 0;
             }
 
             foreach (var script in map.Scripts.Where(s => s.Dirty))
@@ -821,6 +872,19 @@ public static class ModHost
         return [];
     }
 
+    private static IEnumerable<int> LoadOccupiedAltHookIds(string stem, string fieldDir)
+    {
+        foreach (var path in HookMdpCandidates(stem, fieldDir))
+        {
+            if (File.Exists(path))
+            {
+                return MdpHookIds.ReadTable3(File.ReadAllBytes(path));
+            }
+        }
+
+        return [];
+    }
+
     private static IEnumerable<string> HookMdpCandidates(string stem, string fieldDir)
     {
         if (string.IsNullOrWhiteSpace(fieldDir))
@@ -987,9 +1051,7 @@ public static class ModHost
             var patch = MapRamStore.Get(stem);
             var ev = new CallHookEvent(mapId, hookId, table)
             {
-                Row = table != 1 && patch != null && patch.Hooks.TryGetValue(hookId, out var blob)
-                    ? blob.Bytes
-                    : null,
+                Row = TryPatchHookRow(patch, table, hookId),
             };
             Hooks.Invoke("OnCallHook", ev);
 
@@ -1027,15 +1089,35 @@ public static class ModHost
                 MapRamStore.LoadLive(stem, patch);
             }
 
-            if (!patch.Hooks.TryGetValue(hookId, out var cached) ||
+            var cache = table == 2 ? patch.AltHooks : patch.Hooks;
+            if (!cache.TryGetValue(hookId, out var cached) ||
                 !ReferenceEquals(cached.Bytes, ev.Row))
             {
-                patch.SetHook(hookId, ev.Row);
-                cached = patch.Hooks[hookId];
+                if (table == 2)
+                {
+                    patch.SetAltHook(hookId, ev.Row);
+                    cached = patch.AltHooks[hookId];
+                }
+                else
+                {
+                    patch.SetHook(hookId, ev.Row);
+                    cached = patch.Hooks[hookId];
+                }
             }
 
             row = (uint)cached.Ptr;
             return row == 0 ? 0 : 1;
         }
+    }
+
+    private static byte[]? TryPatchHookRow(MapRamPatch? patch, int table, int hookId)
+    {
+        if (patch == null)
+        {
+            return null;
+        }
+
+        var cache = table == 2 ? patch.AltHooks : patch.Hooks;
+        return cache.TryGetValue(hookId, out var blob) ? blob.Bytes : null;
     }
 }

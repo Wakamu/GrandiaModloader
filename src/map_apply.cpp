@@ -10,6 +10,9 @@
 #include <cstring>
 
 namespace grandia_mod {
+
+extern "C" std::uint32_t g_select_p28 = 0;
+
 namespace {
 
 constexpr std::uintptr_t kSec7CopyDoneRva = 0x548C0u;
@@ -41,6 +44,32 @@ constexpr std::uintptr_t kSfxHeapPtrRva = 0x31A280u;   // VA 0x71A280 — sec[29
 constexpr std::uintptr_t kSfxTablePtrRva = 0x240E4Cu;  // VA 0x640E4C — copy+8
 constexpr std::uintptr_t kHeapSec8PtrRva = 0x23FA4Cu;  // VA 0x63FA4C — sec[8] 4 KiB copy
 constexpr std::uintptr_t kAnimDirPtrRva = 0x31CAE0u;   // VA 0x71CAE0 — sec[21] directory
+constexpr std::uintptr_t kCamDirPtrRva = 0x31A644u;    // VA 0x71A644 — sec[15] directory
+constexpr std::uintptr_t kCamIpRva = 0x319934u;        // VA 0x719934 — walker IP
+constexpr std::uintptr_t kFieldParamsPtrRva = 0x23FA9Cu;  // VA 0x63FA9C — sec[10] field object
+constexpr std::uintptr_t kSelectPanXHiRva = 0x313F3Eu;    // VA 0x713F3E
+constexpr std::uintptr_t kSelectPanZHiRva = 0x313F40u;    // VA 0x713F40
+constexpr std::uintptr_t kSelectPanZLoRva = 0x313F42u;    // VA 0x713F42
+constexpr std::uintptr_t kSelectPanXLoRva = 0x313F44u;    // VA 0x713F44
+constexpr std::uintptr_t kPitchRva = 0x319304u;           // VA 0x719304
+constexpr std::uintptr_t kProjARva = 0x31A9D8u;           // VA 0x71A9D8
+constexpr std::uintptr_t kProjBRva = 0x31C1A0u;           // VA 0x71C1A0
+constexpr std::uintptr_t kProjCRva = 0x319708u;           // VA 0x719708
+constexpr std::uintptr_t kClipSpanRva = 0x31C1B0u;        // VA 0x71C1B0 — |hi−lo|
+constexpr std::uintptr_t kClipScaleRva = 0x3196F0u;        // VA 0x7196F0 — +0xEE
+// Select enter (+0x7CF30, SM==1) writes p28 as BE to script 0 +0x20.
+// Stock is `mov ecx, 0x4000` at +0x7D028; tiny AABB can overwrite it.
+// Hook both the immediate and [ebp-4] after the tiny-box branch.
+constexpr std::uintptr_t kSelectP28ImmRva = 0x7D028u;
+constexpr std::size_t kSelectP28ImmPatch = 5u;
+constexpr std::uintptr_t kSelectP28ImmResumeRva = 0x7D02Du;
+constexpr std::uint8_t kSelectP28ImmBytes[] = {0xB9, 0x00, 0x40, 0x00, 0x00};
+constexpr std::uintptr_t kSelectZoomRva = 0x7D0C9u;
+constexpr std::size_t kSelectZoomPatch = 6u;
+constexpr std::uintptr_t kSelectZoomResumeRva = 0x7D0CFu;
+constexpr std::uintptr_t kSelectCamPtrRva = 0x31CD54u;  // VA 0x71CD54
+constexpr std::uintptr_t kSelectP28LiveRva = 0x319334u;  // VA 0x719334
+constexpr std::uintptr_t kPgmdtBlobPtrRva = 0x23FA48u;   // VA 0x63FA48
 constexpr std::uintptr_t kAnimSlotRva = 0x31A740u;     // VA 0x71A740 — 32 × 20-byte slots
 constexpr std::uintptr_t kAnimLatchRva = 0x7A1A0u;
 constexpr std::size_t kAnimLatchPatch = 6u;
@@ -59,6 +88,8 @@ constexpr unsigned kSec7Budget = 0x4000u;
 constexpr unsigned kSec29Budget = 0x400u;
 constexpr unsigned kSec8Budget = 0x1000u;
 constexpr unsigned kSec21Budget = 0x20000u;
+constexpr unsigned kSec15Budget = 0x10000u;
+constexpr unsigned kSec10Budget = 512u;
 constexpr unsigned kAnimSlots = 32;
 constexpr unsigned kAnimSlotStride = 20;
 constexpr unsigned kAnimDirMax = 512;
@@ -79,15 +110,22 @@ void* g_grown_scn = nullptr;
 void* g_grown_ofs = nullptr;
 void* g_grown_sec21 = nullptr;
 void* g_mdp_sec21 = nullptr;
+void* g_grown_sec15 = nullptr;
+unsigned g_sec15_len = 0;
 void* g_grown_streams[kMaxGrownStreams]{};
 unsigned g_grown_stream_n = 0;
 char g_sec21_applied[16]{};
+char g_sec15_applied[16]{};
 void* g_anim_latch_site = nullptr;
 void* g_anim_latch_tramp_mem = nullptr;
 std::uint8_t g_anim_latch_original[8]{};
 void* g_anim_poly_site = nullptr;
 void* g_anim_poly_tramp_mem = nullptr;
 std::uint8_t g_anim_poly_original[8]{};
+void* g_select_zoom_site = nullptr;
+std::uint8_t g_select_zoom_original[8]{};
+void* g_select_p28_imm_site = nullptr;
+std::uint8_t g_select_p28_imm_original[8]{};
 
 void* ReadGlobal(std::uintptr_t rva) {
     void* p = nullptr;
@@ -110,6 +148,17 @@ bool WriteRam(void* dst, const void* src, std::size_t n, std::size_t pad_to = 0)
     }
     VirtualProtect(dst, total, old, &old);
     return true;
+}
+
+bool WriteI16(std::uintptr_t address, std::int16_t value) {
+    return SafeWriteByte(address, static_cast<std::uint8_t>(value & 0xFF)) &&
+           SafeWriteByte(address + 1,
+                         static_cast<std::uint8_t>((static_cast<std::uint16_t>(value) >> 8) & 0xFF));
+}
+
+bool WriteU16(std::uintptr_t address, std::uint16_t value) {
+    return SafeWriteByte(address, static_cast<std::uint8_t>(value & 0xFF)) &&
+           SafeWriteByte(address + 1, static_cast<std::uint8_t>((value >> 8) & 0xFF));
 }
 
 void* GameMalloc(std::size_t n) {
@@ -138,9 +187,10 @@ void FreeGrown() {
     g_grown_scn = nullptr;
     GameFree(g_grown_ofs);
     g_grown_ofs = nullptr;
-    // Do not free g_grown_sec21 here: [0x71CAE0] / live slots may still
-    // point at it. ApplySec21 frees the previous map's buffer after bind
-    // has already retargeted that global to the new MDP.
+    // Do not free g_grown_sec21 / g_grown_sec15 here: [0x71CAE0] /
+    // [0x71A644] / live IP may still point at them. ApplySec21 /
+    // ApplySec15 free the previous map's buffer after bind has already
+    // retargeted those globals to the new MDP.
 }
 
 void* GrowBuf(const void* src, std::size_t n, void** slot) {
@@ -619,6 +669,206 @@ void ApplySec21() {
 
 }
 
+void RetargetCamIp(const std::uint8_t* old_base, const std::uint8_t* new_base, unsigned old_len) {
+    if (!old_base || !new_base || old_base == new_base || old_len == 0) {
+        return;
+    }
+    auto* ip = static_cast<std::uint8_t*>(ReadGlobal(kCamIpRva));
+    if (!ip || ip < old_base || ip >= old_base + old_len) {
+        return;
+    }
+    const auto delta = static_cast<std::intptr_t>(new_base - old_base);
+    SafeWriteU32(ModuleBase() + kCamIpRva,
+                 static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(ip + delta)));
+}
+
+void DiscardStaleGrownSec15(std::uint8_t* cur) {
+    if (g_grown_sec15 && cur != g_grown_sec15) {
+        GameFree(g_grown_sec15);
+        g_grown_sec15 = nullptr;
+    }
+    g_sec15_len = 0;
+    std::memset(g_sec15_applied, 0, sizeof(g_sec15_applied));
+}
+
+void ApplySec15() {
+    auto* cur = static_cast<std::uint8_t*>(ReadGlobal(kCamDirPtrRva));
+    const bool same_map =
+        std::memcmp(g_sec15_applied, g_stem, sizeof(g_sec15_applied)) == 0 && g_stem[0];
+    if (!same_map) {
+        DiscardStaleGrownSec15(cur);
+        cur = static_cast<std::uint8_t*>(ReadGlobal(kCamDirPtrRva));
+    }
+
+    MapPatchInfoNative info{};
+    if (RuntimeMapPatchInfo(g_stem, &info) != 0 || info.dirty == 0 || info.sec15 == 0 ||
+        info.sec15_len <= 0) {
+        return;
+    }
+    const auto n = static_cast<unsigned>(info.sec15_len) < kSec15Budget
+                       ? static_cast<unsigned>(info.sec15_len)
+                       : kSec15Budget;
+    auto* emit = reinterpret_cast<const std::uint8_t*>(info.sec15);
+    const auto old_len = g_sec15_len > 0 ? g_sec15_len : kSec15Budget;
+
+    if (same_map && g_grown_sec15) {
+        auto* grown = static_cast<std::uint8_t*>(g_grown_sec15);
+        std::memcpy(grown, emit, n);
+        if (n < kSec15Budget) {
+            std::memset(grown + n, 0, kSec15Budget - n);
+        }
+        if (cur != grown) {
+            RetargetCamIp(cur, grown, old_len);
+            SafeWriteU32(ModuleBase() + kCamDirPtrRva,
+                         static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(grown)));
+        }
+        g_sec15_len = n;
+        std::memcpy(g_sec15_applied, g_stem, sizeof(g_sec15_applied));
+        return;
+    }
+
+    if (g_grown_sec15 && cur == g_grown_sec15) {
+        auto* grown = static_cast<std::uint8_t*>(g_grown_sec15);
+        std::memcpy(grown, emit, n);
+        if (n < kSec15Budget) {
+            std::memset(grown + n, 0, kSec15Budget - n);
+        }
+        g_sec15_len = n;
+        std::memcpy(g_sec15_applied, g_stem, sizeof(g_sec15_applied));
+        return;
+    }
+
+    if (g_grown_sec15) {
+        GameFree(g_grown_sec15);
+        g_grown_sec15 = nullptr;
+    }
+    auto* mem = GameMalloc(kSec15Budget);
+    if (!mem) {
+        LogWarn("map apply: sec[15] grow alloc failed");
+        return;
+    }
+    std::memcpy(mem, emit, n);
+    if (n < kSec15Budget) {
+        std::memset(static_cast<std::uint8_t*>(mem) + n, 0, kSec15Budget - n);
+    }
+    g_grown_sec15 = mem;
+    auto* grown = static_cast<std::uint8_t*>(mem);
+    RetargetCamIp(cur, grown, old_len);
+    if (!SafeWriteU32(ModuleBase() + kCamDirPtrRva,
+                      static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(grown)))) {
+        LogWarn("map apply: sec[15] [0x71A644] write failed");
+        return;
+    }
+    g_sec15_len = n;
+    std::memcpy(g_sec15_applied, g_stem, sizeof(g_sec15_applied));
+}
+
+void WriteLiveSelectP28(std::uint32_t raw) {
+    if (raw == 0) {
+        return;
+    }
+    const auto base = ModuleBase();
+    SafeWriteU32(base + kSelectP28LiveRva, raw);
+    auto* blob = static_cast<std::uint8_t*>(ReadGlobal(kPgmdtBlobPtrRva));
+    if (!blob) {
+        return;
+    }
+    std::uint32_t off = 0;
+    std::memcpy(&off, blob, 4);
+    if (off < 12 || off > 0x800) {
+        return;
+    }
+    auto* dst = blob + off + 0x20;
+    dst[0] = static_cast<std::uint8_t>(raw >> 24);
+    dst[1] = static_cast<std::uint8_t>(raw >> 16);
+    dst[2] = static_cast<std::uint8_t>(raw >> 8);
+    dst[3] = static_cast<std::uint8_t>(raw);
+}
+
+void LatchSelectP28() {
+    if (!g_stem[0]) {
+        g_select_p28 = 0;
+        return;
+    }
+    MapPatchInfoNative info{};
+    if (RuntimeMapPatchInfo(g_stem, &info) != 0 || info.dirty == 0 || info.select_p28 == 0) {
+        g_select_p28 = 0;
+        return;
+    }
+    g_select_p28 = static_cast<std::uint32_t>(info.select_p28);
+}
+
+void ApplySec10() {
+    LatchSelectP28();
+    if (g_select_p28 != 0) {
+        LogInfo("map apply: Select p28=0x%X on %s", g_select_p28, g_stem);
+        WriteLiveSelectP28(g_select_p28);
+    }
+    MapPatchInfoNative info{};
+    if (RuntimeMapPatchInfo(g_stem, &info) != 0 || info.dirty == 0) {
+        return;
+    }
+    if (info.sec10 == 0 || info.sec10_len < static_cast<std::int32_t>(kSec10Budget)) {
+        return;
+    }
+    auto* heap = static_cast<std::uint8_t*>(ReadGlobal(kFieldParamsPtrRva));
+    if (!heap) {
+        LogWarn("map apply: sec[10] heap [0x63FA9C] is null");
+        return;
+    }
+    auto* src = reinterpret_cast<const std::uint8_t*>(info.sec10);
+    // Camera words only — leave gold / shop pages / encounter tail alone.
+    if (!WriteRam(heap + 0x04, src + 0x04, 0x18) || !WriteRam(heap + 0x84, src + 0x84, 0x14) ||
+        !WriteRam(heap + 0xE4, src + 0xE4, 0x0C)) {
+        LogWarn("map apply: sec[10] camera write failed");
+        return;
+    }
+
+    const int b94 = src[0x94];
+    const int b95 = src[0x95];
+    const int b96 = src[0x96];
+    const int b97 = src[0x97];
+    const auto base = ModuleBase();
+    WriteI16(base + kSelectPanXLoRva, static_cast<std::int16_t>((b94 - 128) << 4));
+    WriteI16(base + kSelectPanXHiRva, static_cast<std::int16_t>((b96 - 128) << 4));
+    WriteI16(base + kSelectPanZHiRva, static_cast<std::int16_t>((128 - b95) << 4));
+    WriteI16(base + kSelectPanZLoRva, static_cast<std::int16_t>((128 - b97) << 4));
+
+    std::uint32_t pitch = 0;
+    std::memcpy(&pitch, src + 0x10, 4);
+    SafeWriteU32(base + kPitchRva, pitch << 16);
+
+    std::uint16_t proj_a = 0;
+    std::uint16_t proj_b = 0;
+    std::uint16_t proj_c = 0;
+    std::memcpy(&proj_a, src + 0x84, 2);
+    std::memcpy(&proj_b, src + 0x86, 2);
+    std::memcpy(&proj_c, src + 0x88, 2);
+    WriteU16(base + kProjARva, proj_a != 0 ? proj_a : 0x400);
+    WriteU16(base + kProjBRva, proj_b != 0 ? proj_b : 0x180);
+    WriteU16(base + kProjCRva, proj_c != 0 ? proj_c : 0x800);
+
+    std::int16_t clip_lo = 0;
+    std::int16_t clip_hi = 0;
+    std::int16_t clip_scale = 0;
+    std::memcpy(&clip_lo, src + 0xE4, 2);
+    std::memcpy(&clip_hi, src + 0xE8, 2);
+    std::memcpy(&clip_scale, src + 0xEE, 2);
+    auto span = static_cast<int>(clip_hi) - static_cast<int>(clip_lo);
+    if (span < 0) {
+        span = -span;
+    }
+    if (span > 32767) {
+        span = 32767;
+    }
+    WriteI16(base + kClipSpanRva, static_cast<std::int16_t>(span));
+    // +0x60E4F: movsx EE; cdq; and edx,0xFF; add; sar 8; shl 16 → 7196F0.
+    // Parm EE=256 → 0x10000. A raw i16 poke is ignored by SoftHD.
+    const auto ee = static_cast<std::int32_t>(clip_scale);
+    const auto adj = ee + ((ee >> 31) & 0xFF);
+    SafeWriteU32(base + kClipScaleRva, static_cast<std::uint32_t>(adj >> 8) << 16);
+}
+
 void ApplyScripts() {
     // SoftHD already overwrote [0x71CD30]/[0x71CD4C]; free last map's grown
     // CRT buffers now so we neither leak nor double-free the live pointers.
@@ -682,6 +932,12 @@ void EncodeMovEcxAbs(std::uint8_t* out, std::uintptr_t abs_addr) {
     std::memcpy(out + 2, &abs_addr, 4);
 }
 
+void EncodeMovEbxAbs(std::uint8_t* out, std::uintptr_t abs_addr) {
+    out[0] = 0x8B;
+    out[1] = 0x1D;
+    std::memcpy(out + 2, &abs_addr, 4);
+}
+
 void EncodeMovAbsEsi(std::uint8_t* out, std::uintptr_t abs_addr) {
     out[0] = 0x89;
     out[1] = 0x35;
@@ -710,6 +966,17 @@ extern "C" void* g_mod_sec7_heap_abs = nullptr;
 extern "C" void* g_mod_anim_latch_tramp = nullptr;
 extern "C" void* g_mod_anim_poly_tramp = nullptr;
 extern "C" void* g_mod_anim_slot_flags_abs = nullptr;
+extern "C" void* g_mod_select_cam_abs = nullptr;
+extern "C" void* g_mod_select_zoom_resume = nullptr;
+extern "C" void* g_mod_select_p28_imm_resume = nullptr;
+
+extern "C" std::uint32_t SelectP28Now() {
+    LatchSelectP28();
+    if (g_select_p28 != 0) {
+        WriteLiveSelectP28(g_select_p28);
+    }
+    return g_select_p28;
+}
 
 extern "C" void ModFixPolyCount(std::uint32_t* pushed, std::uint32_t* start, std::uint32_t slot) {
     if (!pushed || !start || !g_mod_anim_slot_flags_abs || slot >= kAnimSlots || !g_stem[0] ||
@@ -758,6 +1025,33 @@ extern "C" void ModBeforeAnimLatch(std::uint32_t* dir) {
     *dir = static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(grown));
 }
 
+extern "C" __declspec(naked) void ModSelectP28ImmDetour() {
+    __asm {
+        call SelectP28Now
+        mov ecx, eax
+        test ecx, ecx
+        jne got_p28
+        mov ecx, 0x4000
+    got_p28:
+        jmp dword ptr [g_mod_select_p28_imm_resume]
+    }
+}
+
+extern "C" __declspec(naked) void ModSelectZoomDetour() {
+    __asm {
+        push eax
+        call SelectP28Now
+        test eax, eax
+        je skip_p28
+        mov dword ptr [ebp - 4], eax
+    skip_p28:
+        pop eax
+        mov ebx, dword ptr [g_mod_select_cam_abs]
+        mov ebx, dword ptr [ebx]
+        jmp dword ptr [g_mod_select_zoom_resume]
+    }
+}
+
 extern "C" __declspec(naked) void ModAnimLatchDetour() {
     __asm {
         pushad
@@ -780,6 +1074,7 @@ extern "C" void ModAfterSec7Relocate() {
     // is already done; latch at +0x7A1A0 does base+off from [0x71CAE0].
     ApplySec7();
     ApplySec21();
+    ApplySec15();
 }
 
 extern "C" void ModAfterScnBind() {
@@ -793,6 +1088,8 @@ extern "C" void ModBeforeSfxBind() {
 extern "C" void ModAfterSec8Copy() {
     ApplySec8();
     ApplySec21();
+    ApplySec15();
+    ApplySec10();
 }
 
 extern "C" __declspec(naked) void ModSec7CopyDetour() {
@@ -867,6 +1164,7 @@ void NoteMapStem(const char* stem) {
         }
         g_stem[i] = c;
     }
+    LatchSelectP28();
 }
 
 bool InstallMapApplyHooks() {
@@ -979,6 +1277,21 @@ bool InstallMapApplyHooks() {
         LogWarn("map apply anim polyline count site mismatch at +0x%X",
                 static_cast<unsigned>(kAnimPolyTailRva));
     }
+    ok += install(kSelectP28ImmRva, kSelectP28ImmPatch, kSelectP28ImmBytes,
+                  reinterpret_cast<void*>(&ModSelectP28ImmDetour), &g_mod_select_p28_imm_resume,
+                  kSelectP28ImmResumeRva, g_select_p28_imm_original, &g_select_p28_imm_site,
+                  "select-p28-imm")
+              ? 1
+              : 0;
+    std::uint8_t select_zoom_expect[6]{};
+    EncodeMovEbxAbs(select_zoom_expect, base + kSelectCamPtrRva);
+    g_mod_select_cam_abs = reinterpret_cast<void*>(base + kSelectCamPtrRva);
+    ok += install(kSelectZoomRva, kSelectZoomPatch, select_zoom_expect,
+                  reinterpret_cast<void*>(&ModSelectZoomDetour), &g_mod_select_zoom_resume,
+                  kSelectZoomResumeRva, g_select_zoom_original, &g_select_zoom_site,
+                  "select-p28")
+              ? 1
+              : 0;
     return ok > 0;
 #endif
 }
@@ -1027,11 +1340,29 @@ void RemoveMapApplyHooks() {
         g_mod_anim_slot_flags_abs = nullptr;
 #endif
     }
+    if (g_select_zoom_site) {
+        RestoreBytes(g_select_zoom_site, g_select_zoom_original, kSelectZoomPatch);
+        g_select_zoom_site = nullptr;
+    }
+    if (g_select_p28_imm_site) {
+        RestoreBytes(g_select_p28_imm_site, g_select_p28_imm_original, kSelectP28ImmPatch);
+        g_select_p28_imm_site = nullptr;
+    }
+#if defined(_M_IX86)
+    g_mod_select_cam_abs = nullptr;
+    g_mod_select_zoom_resume = nullptr;
+    g_mod_select_p28_imm_resume = nullptr;
+#endif
+    g_select_p28 = 0;
     GameFree(g_grown_sec21);
     g_grown_sec21 = nullptr;
     g_mdp_sec21 = nullptr;
+    GameFree(g_grown_sec15);
+    g_grown_sec15 = nullptr;
+    g_sec15_len = 0;
     FreeGrownStreams();
     std::memset(g_sec21_applied, 0, sizeof(g_sec21_applied));
+    std::memset(g_sec15_applied, 0, sizeof(g_sec15_applied));
     FreeGrown();
 }
 

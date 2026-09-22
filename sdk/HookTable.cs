@@ -44,7 +44,7 @@ public sealed class HookTable
         }
     }
 
-    /// <summary>First unused table-2 id in 1..255 (vanilla rows + hooks added this load).</summary>
+    /// <summary>First unused id in 1..255 (vanilla rows + hooks added this load).</summary>
     public int NextId()
     {
         Ensure?.Invoke();
@@ -56,7 +56,7 @@ public sealed class HookTable
             }
         }
 
-        throw new InvalidOperationException("no free table-2 hook id (1–255 are all used)");
+        throw new InvalidOperationException("no free hook id (1–255 are all used)");
     }
 
     public Hook Add() => Add(NextId());

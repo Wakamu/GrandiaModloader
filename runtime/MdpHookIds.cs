@@ -18,10 +18,14 @@ internal static class MdpHookIds
         return ReadTable2(File.ReadAllBytes(path));
     }
 
-    public static List<int> ReadTable2(byte[] mdp)
+    public static List<int> ReadTable2(byte[] mdp) => ReadTable(mdp, 2);
+
+    public static List<int> ReadTable3(byte[] mdp) => ReadTable(mdp, 3);
+
+    public static List<int> ReadTable(byte[] mdp, int table)
     {
         var ids = new List<int>();
-        if (mdp.Length < HeaderSize)
+        if (mdp.Length < HeaderSize || table is < 2 or > 3)
         {
             return ids;
         }
@@ -32,12 +36,12 @@ internal static class MdpHookIds
         }
 
         var end = Math.Min(off + len, mdp.Length);
-        var count2 = mdp[off + 3];
-        var rel2 = BinaryPrimitives.ReadUInt32LittleEndian(mdp.AsSpan(off + 16, 4));
+        var count = mdp[off + 1 + table];
+        var rel = BinaryPrimitives.ReadUInt32LittleEndian(mdp.AsSpan(off + 8 + table * 4, 4));
         const int rowSize = 20;
-        for (var i = 0; i < count2; i++)
+        for (var i = 0; i < count; i++)
         {
-            var at = off + (int)rel2 + i * rowSize;
+            var at = off + (int)rel + i * rowSize;
             if (at < off || at + rowSize > end)
             {
                 break;

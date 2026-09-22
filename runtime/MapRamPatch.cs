@@ -26,6 +26,8 @@ internal sealed class MapRamPatch
     private byte[] _sec29 = [];
     private byte[] _sec8 = [];
     private byte[] _sec21 = [];
+    private byte[] _sec15 = [];
+    private byte[] _sec10 = [];
 
     public byte[] Sec29
     {
@@ -68,17 +70,51 @@ internal sealed class MapRamPatch
             _sec21 = value ?? [];
         }
     }
+
+    public byte[] Sec15
+    {
+        get => _sec15;
+        set
+        {
+            if (_sec15Pin.IsAllocated)
+            {
+                _sec15Pin.Free();
+            }
+
+            _sec15 = value ?? [];
+        }
+    }
+
+    public byte[] Sec10
+    {
+        get => _sec10;
+        set
+        {
+            if (_sec10Pin.IsAllocated)
+            {
+                _sec10Pin.Free();
+            }
+
+            _sec10 = value ?? [];
+        }
+    }
+
     public byte[] Scn { get; init; } = [];
     public byte[] Ofs { get; init; } = [];
     public int StockScnLen { get; init; }
     public int StockOfsLen { get; init; }
+    /// <summary>Select-enter p28 (16.16). 0 = stock 0x4000, do not override.</summary>
+    public int SelectP28 { get; set; }
     public Dictionary<int, RedirectBlob> Scripts { get; } = [];
     public Dictionary<int, RedirectBlob> Hooks { get; } = [];
+    public Dictionary<int, RedirectBlob> AltHooks { get; } = [];
 
     private GCHandle _sec7;
     private GCHandle _sec29Pin;
     private GCHandle _sec8Pin;
     private GCHandle _sec21Pin;
+    private GCHandle _sec15Pin;
+    private GCHandle _sec10Pin;
     private GCHandle _scn;
     private GCHandle _ofs;
     private bool _pinned;
@@ -116,6 +152,11 @@ internal sealed class MapRamPatch
             blob.Pin();
         }
 
+        foreach (var blob in AltHooks.Values)
+        {
+            blob.Pin();
+        }
+
         _pinned = true;
         PinHeapCopies();
     }
@@ -136,12 +177,24 @@ internal sealed class MapRamPatch
         {
             _sec21Pin = GCHandle.Alloc(Sec21, GCHandleType.Pinned);
         }
+
+        if (Sec15.Length > 0 && !_sec15Pin.IsAllocated)
+        {
+            _sec15Pin = GCHandle.Alloc(Sec15, GCHandleType.Pinned);
+        }
+
+        if (Sec10.Length > 0 && !_sec10Pin.IsAllocated)
+        {
+            _sec10Pin = GCHandle.Alloc(Sec10, GCHandleType.Pinned);
+        }
     }
 
     public nint Sec7Ptr => _sec7.IsAllocated ? _sec7.AddrOfPinnedObject() : 0;
     public nint Sec29Ptr => _sec29Pin.IsAllocated ? _sec29Pin.AddrOfPinnedObject() : 0;
     public nint Sec8Ptr => _sec8Pin.IsAllocated ? _sec8Pin.AddrOfPinnedObject() : 0;
     public nint Sec21Ptr => _sec21Pin.IsAllocated ? _sec21Pin.AddrOfPinnedObject() : 0;
+    public nint Sec15Ptr => _sec15Pin.IsAllocated ? _sec15Pin.AddrOfPinnedObject() : 0;
+    public nint Sec10Ptr => _sec10Pin.IsAllocated ? _sec10Pin.AddrOfPinnedObject() : 0;
     public nint ScnPtr => _scn.IsAllocated ? _scn.AddrOfPinnedObject() : 0;
     public nint OfsPtr => _ofs.IsAllocated ? _ofs.AddrOfPinnedObject() : 0;
 
@@ -157,6 +210,13 @@ internal sealed class MapRamPatch
         var blob = new RedirectBlob { Id = id, Bytes = bytes };
         blob.Pin();
         Hooks[id] = blob;
+    }
+
+    public void SetAltHook(int id, byte[] bytes)
+    {
+        var blob = new RedirectBlob { Id = id, Bytes = bytes };
+        blob.Pin();
+        AltHooks[id] = blob;
     }
 }
 
@@ -183,6 +243,8 @@ internal static class MapRamStore
     internal const int Sec29Budget = MdpSec29.HeapSize;
     internal const int Sec8Budget = MdpSec8.HeapSize;
     internal const int Sec21Budget = 0x20000;
+    internal const int Sec15Budget = 0x10000;
+    internal const int Sec10Budget = MdpSec10.Size;
     private static readonly Dictionary<string, MapRamPatch?> Patches = new(StringComparer.OrdinalIgnoreCase);
 
     public static bool Has(string stem) => Patches.ContainsKey(stem);
@@ -223,7 +285,8 @@ internal static class MapRamStore
             StockOfsLen = 0,
         };
         ExtractScripts(patch, OfsIds(patch.Ofs));
-        ExtractHooks(patch, Sec7HookIds(patch.Sec7));
+        ExtractHooks(patch, Sec7HookIds(patch.Sec7, 2), 2, patch.Hooks);
+        ExtractHooks(patch, Sec7HookIds(patch.Sec7, 3), 3, patch.AltHooks);
         LoadLive(stem, patch);
     }
 
@@ -244,20 +307,20 @@ internal static class MapRamStore
         return ids;
     }
 
-    private static List<int> Sec7HookIds(byte[] sec7)
+    private static List<int> Sec7HookIds(byte[] sec7, int table = 2)
     {
-        if (sec7.Length < 0x18)
+        if (sec7.Length < 0x18 || table is < 2 or > 3)
         {
             return [];
         }
 
         var ids = new List<int>();
-        var count2 = sec7[3];
-        var rel2 = BitConverter.ToInt32(sec7, 16);
+        var count = sec7[1 + table];
+        var rel = BitConverter.ToInt32(sec7, 8 + table * 4);
         const int rowSize = 20;
-        for (var i = 0; i < count2; i++)
+        for (var i = 0; i < count; i++)
         {
-            var at = rel2 + i * rowSize;
+            var at = rel + i * rowSize;
             if (at < 0 || at + rowSize > sec7.Length)
             {
                 break;
@@ -295,7 +358,7 @@ internal static class MapRamStore
             StockOfsLen = stockOfs,
         };
         ExtractScripts(patch, dirtyScripts);
-        ExtractHooks(patch, dirtyHooks);
+        ExtractHooks(patch, dirtyHooks, 2, patch.Hooks);
         patch.Pin();
         Patches[stem] = patch;
         return patch;
@@ -346,21 +409,22 @@ internal static class MapRamStore
         }
     }
 
-    private static void ExtractHooks(MapRamPatch patch, IReadOnlyCollection<int> dirty)
+    private static void ExtractHooks(MapRamPatch patch, IReadOnlyCollection<int> dirty, int table,
+        Dictionary<int, RedirectBlob> dest)
     {
-        if (dirty.Count == 0 || patch.Sec7.Length < 0x18)
+        if (dirty.Count == 0 || patch.Sec7.Length < 0x18 || table is < 2 or > 3)
         {
             return;
         }
 
         var want = dirty.ToHashSet();
         var sec7 = patch.Sec7;
-        var count2 = sec7[3];
-        var rel2 = BitConverter.ToInt32(sec7, 16);
+        var count = sec7[1 + table];
+        var rel = BitConverter.ToInt32(sec7, 8 + table * 4);
         const int rowSize = 20;
-        for (var i = 0; i < count2; i++)
+        for (var i = 0; i < count; i++)
         {
-            var at = rel2 + i * rowSize;
+            var at = rel + i * rowSize;
             if (at < 0 || at + rowSize > sec7.Length)
             {
                 break;
@@ -372,7 +436,7 @@ internal static class MapRamStore
                 continue;
             }
 
-            patch.Hooks[hid] = new RedirectBlob
+            dest[hid] = new RedirectBlob
             {
                 Id = hid,
                 Bytes = sec7.AsSpan(at, rowSize).ToArray(),

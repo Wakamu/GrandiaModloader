@@ -1,7 +1,7 @@
 namespace Grandia.Sdk;
 
 /// <summary>
-/// Live game RAM: stash, gold, flags, party walk pos, turbo, encounters, save extra, and debug.
+/// Live game RAM: stash, gold, flags, party walk pos, turbo, encounters, compass, save extra, and debug.
 /// Bound by GrandiaMod.dll after a save is in memory. Safe to call from
 /// hook methods (<see cref="OnTickAttribute"/>, <see cref="OnBattleLoadAttribute"/>, …).
 /// </summary>
@@ -24,6 +24,13 @@ public static class Game
     public static GameEncounters Encounters { get; } = new();
 
     public static GameDebug Debug { get; } = new();
+
+    /// <summary>
+    /// Field 3D compass (top-right). <see cref="GameCompass.Visible"/> =
+    /// false skips the <c>+0x6EC50</c> submit. Set from <c>Init</c> or
+    /// <see cref="OnMapLoadAttribute"/> before the first field frame.
+    /// </summary>
+    public static GameCompass Compass { get; } = new();
 
     public static GameInput Input { get; } = new();
 
@@ -143,8 +150,9 @@ public static class Game
     }
 
     /// <summary>
-    /// Queue <c>call_hook N</c> (table 1) or <c>call_hook N alt</c> (table 2)
-    /// for the next idle field tick. Goes through <c>+0x53560</c> so
+    /// Queue <c>call_hook N</c> (engine table 1 → sec[7] table 2) or
+    /// <c>call_hook N alt</c> (engine table 2 → sec[7] table 3) for the
+    /// next idle field tick. Goes through <c>+0x53560</c> so
     /// <see cref="OnCallHookAttribute"/> still runs.
     /// </summary>
     public static bool RunHook(int hookId, int table = 1) =>

@@ -16,6 +16,7 @@ internal static class Sec7Hydrator
     {
         map.Zones.Ensure = null;
         map.Hooks.Ensure = null;
+        map.AltHooks.Ensure = null;
         map.Sfx.Ensure = null;
         map.Npcs.Ensure = null;
         map.Anims.Ensure = null;
@@ -23,6 +24,8 @@ internal static class Sec7Hydrator
         map.Poses.Ensure = null;
         map.Sprites.Ensure = null;
         map.Textures.Ensure = null;
+        map.CameraPaths.Ensure = null;
+        map.Camera.Ensure = null;
         map.EnsureEncounters = null;
 
         var sec7 = MdpHookIds.TrySlice(mdp, 7);
@@ -37,9 +40,10 @@ internal static class Sec7Hydrator
                 var tables = MdpSec7.Parse(sec7);
                 map.Zones.Hydrate(tables.Zones.Select((raw, i) => Zone.FromRaw(i, raw)));
                 map.Hooks.Hydrate(tables.Hooks.Select(Hook.FromRaw));
+                map.AltHooks.Hydrate(tables.AltHooks.Select(Hook.FromRaw));
                 encounters.AddRange(MapEncounter.FromSec7(tables));
                 zoneCount = tables.Zones.Count;
-                hookCount = tables.Hooks.Count;
+                hookCount = tables.Hooks.Count + tables.AltHooks.Count;
             }
 
             encounters.AddRange(MapEncounter.FromField(MdpHookIds.TrySlice(mdp, 8), MdpHookIds.TrySlice(mdp, 30)));
@@ -57,6 +61,8 @@ internal static class Sec7Hydrator
             var sheets = LoadSpriteSheets(map.Stem, fieldDir);
             map.Sprites.Hydrate(uv, sheets);
             map.Textures.Hydrate(MdpTim.FromMdp(mdp));
+            map.CameraPaths.Hydrate(MdpSec15.Parse(MdpHookIds.TrySlice(mdp, 15) ?? []).Items);
+            map.Camera.Hydrate(MdpHookIds.TrySlice(mdp, 10));
 
         }
         catch (Exception ex)

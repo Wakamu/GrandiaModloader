@@ -313,6 +313,32 @@ public class MdpSec7Tests
     }
 
     [Fact]
+    public void Apply_appends_and_replaces_table3_alt_hook()
+    {
+        var stock = Convert.FromHexString("3619000040610000510000000000000000000000");
+        var tables = new MdpSec7 { Flags = 1 };
+        tables.AltHooks.Add(stock);
+        var vanilla = tables.Emit();
+
+        var map = new Map("2406");
+        map.AltHooks.Hydrate([Hook.FromRaw(stock)]);
+        Assert.False(map.Dirty);
+        var alt = map.AltHooks.Get(0x36);
+        Assert.NotNull(alt);
+        Assert.Contains("scripted_battle", alt.Line);
+
+        map.ReplaceAltHook(0x36, "scripted_battle table=0x61 5x2");
+        map.AddAltHook("setup dest=0xCC15 spawn=1", 200);
+        var sec7 = MdpSec7.Apply(vanilla, map);
+        var parsed = MdpSec7.Parse(sec7);
+        Assert.Equal(2, parsed.AltHooks.Count);
+        Assert.Equal(0x36, parsed.AltHooks[0][0]);
+        Assert.Equal(200, parsed.AltHooks[1][0]);
+        Assert.Contains("5x2", FieldHookAsm.FormatHook(parsed.AltHooks[0]));
+        Assert.Empty(parsed.Hooks);
+    }
+
+    [Fact]
     public void Apply_replaces_setup_zone_by_dest()
     {
         var dest = 0x3404;

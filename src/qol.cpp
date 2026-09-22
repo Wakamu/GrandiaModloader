@@ -40,6 +40,14 @@ int ModPadFillIsBlocked();
 }
 #endif
 
+extern "C" {
+int g_compass_visible = 1;
+#if defined(_M_IX86)
+void* g_compass_draw_tramp = nullptr;
+void ModCompassDrawDetour();
+#endif
+}
+
 namespace grandia_mod {
 
 void RaiseTick();
@@ -64,6 +72,11 @@ constexpr std::uintptr_t kTitleMenuInputRva = 0x7C34u;
 constexpr std::size_t kTitleMenuInputStolen = 6;
 constexpr std::uintptr_t kTitleMenuSkipRva = 0x7DBCu;
 constexpr std::size_t kPadObjBytes = 0x18;
+constexpr std::uintptr_t kCompassDrawRva = 0x6EC50u;
+constexpr std::size_t kCompassDrawPatch = 6;
+constexpr std::uint8_t kCompassDrawBytes[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x24};
+constexpr std::uintptr_t kCompassShownRva = 0x2C28C7u;
+constexpr std::uintptr_t kCompassFadeInRva = 0x2C28CAu;
 
 using QueryPerformanceCounter_t = BOOL(WINAPI*)(LARGE_INTEGER*);
 using GetTickCount_t = DWORD(WINAPI*)();
@@ -122,6 +135,72 @@ std::uint8_t g_title_pad_call_orig[2][8]{};
 void* g_title_menu_site = nullptr;
 void* g_title_menu_tramp_mem = nullptr;
 std::uint8_t g_title_menu_original[8]{};
+void* g_compass_site = nullptr;
+void* g_compass_tramp_mem = nullptr;
+std::uint8_t g_compass_original[8]{};
+
+void ApplyCompassFade(bool visible) {
+    const auto base = ModuleBase();
+    if (base == 0) {
+        return;
+    }
+    if (visible) {
+        SafeWriteByte(base + kCompassShownRva, 0);
+        SafeWriteByte(base + kCompassFadeInRva, 5);
+        return;
+    }
+    SafeWriteByte(base + kCompassShownRva, 1);
+}
+
+bool InstallCompassHook() {
+#if !defined(_M_IX86)
+    return false;
+#else
+    if (g_compass_site) {
+        return true;
+    }
+    const auto base = ModuleBase();
+    if (base == 0) {
+        return false;
+    }
+    auto* site = reinterpret_cast<std::uint8_t*>(base + kCompassDrawRva);
+    if (!IsExecutableAddress(site) || !BytesMatch(site, kCompassDrawBytes, kCompassDrawPatch)) {
+        LogWarn("field compass +0x6EC50 site mismatch");
+        return false;
+    }
+    g_compass_tramp_mem = MakeTrampoline(site, kCompassDrawPatch, site + kCompassDrawPatch);
+    if (!g_compass_tramp_mem) {
+        LogWarn("field compass trampoline alloc failed");
+        return false;
+    }
+    g_compass_draw_tramp = g_compass_tramp_mem;
+    if (!WriteJump(site, reinterpret_cast<void*>(&ModCompassDrawDetour), g_compass_original,
+                   kCompassDrawPatch)) {
+        VirtualFree(g_compass_tramp_mem, 0, MEM_RELEASE);
+        g_compass_tramp_mem = nullptr;
+        g_compass_draw_tramp = nullptr;
+        LogWarn("field compass +0x6EC50 hook failed");
+        return false;
+    }
+    g_compass_site = site;
+    return true;
+#endif
+}
+
+void RemoveCompassHook() {
+    if (g_compass_site) {
+        RestoreBytes(g_compass_site, g_compass_original, kCompassDrawPatch);
+        g_compass_site = nullptr;
+    }
+#if defined(_M_IX86)
+    g_compass_draw_tramp = nullptr;
+#endif
+    if (g_compass_tramp_mem) {
+        VirtualFree(g_compass_tramp_mem, 0, MEM_RELEASE);
+        g_compass_tramp_mem = nullptr;
+    }
+    g_compass_visible = 1;
+}
 
 int ClampSpeedLevel(int level) {
     if (level <= 0) {
@@ -792,12 +871,16 @@ bool InstallQolHooks() {
     if (!InstallPadBlockHook()) {
         LogWarn("OnTick pad-refresh hook not installed — BlockGameInput may miss a frame");
     }
+    if (!InstallCompassHook()) {
+        LogWarn("field compass +0x6EC50 hook not installed — Game.Compass.Visible may miss");
+    }
     StartTickThread();
     return turbo;
 }
 
 void RemoveQolHooks() {
     StopTickThread();
+    RemoveCompassHook();
     RemovePadBlockHook();
     RemoveD3dHud();
     RemoveSpeedTurboIat();
@@ -860,6 +943,16 @@ int DebugSet(int on) {
         return 0;
     }
 
+    return 1;
+}
+
+int CompassGet() {
+    return g_compass_visible > 0 ? 1 : 0;
+}
+
+int CompassSet(int visible) {
+    g_compass_visible = visible ? 1 : 0;
+    ApplyCompassFade(g_compass_visible != 0);
     return 1;
 }
 
@@ -948,6 +1041,14 @@ extern "C" int ModDebugSet(int on) {
     return grandia_mod::DebugSet(on);
 }
 
+extern "C" int ModCompassGet() {
+    return grandia_mod::CompassGet();
+}
+
+extern "C" int ModCompassSet(int visible) {
+    return grandia_mod::CompassSet(visible);
+}
+
 extern "C" int ModKeyDown(int vk) {
     return grandia_mod::KeyDown(vk);
 }
@@ -1020,6 +1121,16 @@ extern "C" __declspec(naked) void ModTitleMenuGateDetour() {
         jmp dword ptr [g_title_menu_tramp]
     skip_menu:
         jmp dword ptr [g_title_menu_skip]
+    }
+}
+
+extern "C" __declspec(naked) void ModCompassDrawDetour() {
+    __asm {
+        cmp dword ptr [g_compass_visible], 0
+        je hide
+        jmp dword ptr [g_compass_draw_tramp]
+    hide:
+        ret
     }
 }
 #endif

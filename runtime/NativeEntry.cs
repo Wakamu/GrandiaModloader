@@ -56,6 +56,11 @@ public unsafe struct MapPatchInfoNative
     public int Sec8Len;
     public uint Sec21;
     public int Sec21Len;
+    public uint Sec15;
+    public int Sec15Len;
+    public uint Sec10;
+    public int Sec10Len;
+    public int SelectP28;
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
@@ -565,6 +570,11 @@ public static unsafe class NativeEntry
             req->Sec8Len = patch.Sec8.Length;
             req->Sec21 = (uint)patch.Sec21Ptr;
             req->Sec21Len = patch.Sec21.Length;
+            req->Sec15 = (uint)patch.Sec15Ptr;
+            req->Sec15Len = patch.Sec15.Length;
+            req->Sec10 = (uint)patch.Sec10Ptr;
+            req->Sec10Len = patch.Sec10.Length;
+            req->SelectP28 = patch.SelectP28;
             return 0;
         }
         catch (Exception ex)
@@ -787,7 +797,6 @@ public static unsafe class NativeEntry
 
                 if (dest.Map.Value == 0)
                 {
-                    dirty = true;
                     continue;
                 }
 

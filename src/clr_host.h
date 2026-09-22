@@ -30,9 +30,14 @@ struct MapPatchInfoNative {
     std::int32_t sec8_len;
     std::uint32_t sec21;
     std::int32_t sec21_len;
+    std::uint32_t sec15;
+    std::int32_t sec15_len;
+    std::uint32_t sec10;
+    std::int32_t sec10_len;
+    std::int32_t select_p28;
 };
 #pragma pack(pop)
-static_assert(sizeof(MapPatchInfoNative) == 76, "MapPatchInfoNative pack must match C#");
+static_assert(sizeof(MapPatchInfoNative) == 96, "MapPatchInfoNative pack must match C#");
 
 int RuntimeMapPatchInfo(const char* stem, MapPatchInfoNative* info);
 

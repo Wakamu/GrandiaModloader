@@ -64,6 +64,8 @@ public struct HostApiNative
     public nint Quit;
     public nint XpGet;
     public nint XpSet;
+    public nint CompassGet;
+    public nint CompassSet;
 }
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -252,6 +254,12 @@ internal delegate int XpGetFn(int kind);
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal delegate int XpSetFn(int kind, int multiplier);
 
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate int CompassGetFn();
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate int CompassSetFn(int visible);
+
 internal sealed class NativeGame : INativeGame
 {
     private readonly StashAddFn _stashAdd;
@@ -312,6 +320,8 @@ internal sealed class NativeGame : INativeGame
     private readonly QuitFn? _quit;
     private readonly XpGetFn? _xpGet;
     private readonly XpSetFn? _xpSet;
+    private readonly CompassGetFn? _compassGet;
+    private readonly CompassSetFn? _compassSet;
 
     public NativeGame(HostApiNative api)
     {
@@ -436,6 +446,12 @@ internal sealed class NativeGame : INativeGame
             : null;
         _xpSet = api.XpSet != 0
             ? Marshal.GetDelegateForFunctionPointer<XpSetFn>(api.XpSet)
+            : null;
+        _compassGet = api.CompassGet != 0
+            ? Marshal.GetDelegateForFunctionPointer<CompassGetFn>(api.CompassGet)
+            : null;
+        _compassSet = api.CompassSet != 0
+            ? Marshal.GetDelegateForFunctionPointer<CompassSetFn>(api.CompassSet)
             : null;
     }
 
@@ -587,4 +603,8 @@ internal sealed class NativeGame : INativeGame
     public int XpGet(int kind) => _xpGet?.Invoke(kind) ?? 1;
 
     public int XpSet(int kind, int multiplier) => _xpSet?.Invoke(kind, multiplier) ?? 1;
+
+    public int CompassGet() => _compassGet?.Invoke() ?? 1;
+
+    public int CompassSet(int visible) => _compassSet?.Invoke(visible) ?? 1;
 }

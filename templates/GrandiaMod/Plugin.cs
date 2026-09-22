@@ -7,6 +7,7 @@ public sealed class Plugin
     public void Init(ModContext ctx)
     {
         ctx.Register<Hooks>();
+        // Game.Compass.Visible = false; // hide the field 3D compass (top-right). Set here or in OnMapLoad before the first field frame.
     }
 }
 
@@ -16,7 +17,7 @@ sealed class Hooks
     public void OnMapLoad(MapLoadEvent e)
     {
         // Mutate e.Map for this fopen. Skip maps you do not care about:
-        // if (e.To.Value != 0xCC15) return;
+        // if (e.To != Maps.NewParm) return;
         // e.Map.Zones / e.Map.Sfx (sec[29] river, frogs) hydrate on first read.
         // e.Map.Sfx[0].Sfx = 16; e.Map.AddSfx(16, x, y, z); e.Map.Sfx.OfSfx(16)[0].Remove();
         // e.Map.Npcs is sec[8] kind 0 (stand) / kind 4 (walk). Not Marna wanderers.
@@ -25,6 +26,19 @@ sealed class Hooks
         // e.Map.Anims is sec[21] clips (not on the NPC row). Shared-bank ids are omitted.
         // clip.SetFrames([...], header: 8); clip.SetCues([new MapAnimCue(0, 2, 38)]);
         // var clip = e.Map.Anims.OfId(2); e.Map.AddHook($"anim {clip.Id} talk={npc.TalkId} mode=2");
+        // e.Map.AltHooks is table 3 (call_hook N alt). Same Line / AddAltHook as Hooks.
+        // var alt = e.Map.AltHooks.Get(36); e.Map.AddAltHook("scripted_battle table=0x61 5x1");
+        // e.Map.CameraPaths is sec[15] (camera_path N, 1-based). BA38 hook 27 is id 1.
+        // var cam = e.Map.CameraPaths.OfId(1); // cam.ToAsm() / cam.Lines / cam.Replace(...)
+        // cam.Replace("set_pos -106 64 133\nset_rot 22.5 45 0\nwait 60\nend");
+        // e.Map.AddCameraPath("set_pos 0 80 0\nwait 30\nend");
+        // e.Map.CameraPaths.OfId(2)?.Remove();
+        // e.Map.Camera is sec[10] (mode / pitch / Select pan / follow / proj).
+        // e.Map.Camera.Mode = CameraMode.Interior;
+        // e.Map.Camera.Pitch = 45;
+        // e.Map.Camera.SelectPan.SetBounds(-752, -1312, 1312, 1376);
+        // e.Map.Camera.SelectPan.Distance = 0.12f; // Select height (p28). Stock 0.25; smaller = further from the ground.
+        // e.Map.Camera.SelectPan.Enabled = false;
         // e.Map.SpriteClips / e.Map.Poses are sec[23] (unit_bind x = clip id). Read-only.
         // var spr = e.Map.SpriteClips.OfId(15); var pose = e.Map.Poses[spr.Frames[0].Pose];
         // e.Map.Textures is the original PS1 TIM (sec[1]/[27]). SoftHD catalogs stay on Sprites.
