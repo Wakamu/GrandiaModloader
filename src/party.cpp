@@ -71,6 +71,10 @@ constexpr std::uintptr_t kBattleCtxPtrRva = 0x2D1A98u;
 // Type-7 combatant slice of the 0x70F120 actor table (id at combatant+4).
 constexpr std::uintptr_t kCombatantTableRva = 0x311FA0u;
 constexpr unsigned kCombatantTableCount = 0xF8u;
+// +0x12F500 ticks these 8-slot slices every frame and calls +0x95050
+// (reads actor+0x70). Ally/guest units live at 7117E0; enemies at 711FA0.
+constexpr std::uintptr_t kAllyCombatantTableRva = 0x3117E0u;
+constexpr unsigned kBattleCombatantSliceCount = 8u;
 constexpr std::uint16_t kAttachModelFlag = 0x5000u;
 constexpr std::uint16_t kAttachBodyModelFlag = 0x400u;
 constexpr std::uintptr_t kAttachBodyInitRva = 0xADFA0u;
@@ -166,6 +170,7 @@ bool g_seed_on = false;
 std::uint8_t g_saved_field0a[4]{};
 bool g_field0a_saved = false;
 bool g_staged = false;
+bool g_restore_pending = false;
 bool g_saw_fight_spawn = false;
 std::uint8_t g_last_battle_mode = 0xFFu;
 bool g_spawn_hooks_ok = false;
@@ -298,6 +303,9 @@ bool PtrReadable(const void* p, std::size_t bytes);
 void ObserveBattleMode();
 void PollPartyRestore(bool field_map_fopen = false);
 void CommitFieldPartyRestore();
+void TryFreePdatBattlePack();
+bool PdatStillReferenced();
+int CountLivingAllies();
 void ClearFightOverride();
 void FillBattleLoadIdentity(BattleLoadNative* req);
 void WriteBattleLoadEncounter(const BattleLoadNative* req);
@@ -405,12 +413,20 @@ void ObserveBattleMode() {
     PollPartyRestore(false);
 }
 
+void TryFreePdatBattlePack() {
+    if (PdatPackRebuilt() && PdatStillReferenced()) {
+        g_restore_pending = true;
+        return;
+    }
+    ResetPdatBattlePack();
+    g_restore_pending = false;
+}
+
 void CommitFieldPartyRestore() {
-    if (!g_staged && !g_field0a_saved) {
+    if (!g_staged && !g_field0a_saved && !g_restore_pending) {
         return;
     }
     SetBattleCullPatches(false);
-    ResetPdatBattlePack();
     if (g_field0a_saved) {
         std::uint8_t cur[4]{};
         const bool dirty = !ReadFieldParty(cur) || !SameParty(cur, g_saved_field0a);
@@ -424,6 +440,7 @@ void CommitFieldPartyRestore() {
     g_saw_fight_spawn = false;
     g_field0a_saved = false;
     ClearFightOverride();
+    TryFreePdatBattlePack();
 }
 
 void ClearFightOverride() {
@@ -634,6 +651,8 @@ void PollPartyRestore(bool field_map_fopen) {
     g_last_battle_mode = mode;
     if (restore) {
         CommitFieldPartyRestore();
+    } else if (g_restore_pending) {
+        TryFreePdatBattlePack();
     }
 }
 
@@ -2324,7 +2343,10 @@ extern "C" void* ModBattleModelBindResolve(void* header) {
     if (grandia_mod::ModelHeaderReadable(header)) {
         return header;
     }
-    return grandia_mod::LeaderModelHeader();
+    if (grandia_mod::g_staged) {
+        return grandia_mod::LeaderModelHeader();
+    }
+    return header;
 }
 
 extern "C" int ModBattleAnimBindResolve(unsigned bank) {
@@ -2437,34 +2459,119 @@ void RememberFightIdentity(const BattleLoadNative* req) {
     g_fight_row = req->encounter[13];
 }
 
-int CountLivingFieldEnemies() {
+void CurrentPartyIds(std::uint8_t* out) {
+    if (!out) {
+        return;
+    }
+    if (g_staged) {
+        std::memcpy(out, g_override_ids, 4);
+        return;
+    }
+    if (g_field0a_saved) {
+        std::memcpy(out, g_saved_field0a, 4);
+        return;
+    }
+    if (!ReadFieldParty(out)) {
+        std::memset(out, 0, 4);
+    }
+}
+
+bool PartyIdInRoster(std::uint8_t id, const std::uint8_t* ids) {
+    if (id < 1u || id > 8u || !ids) {
+        return false;
+    }
+    for (int i = 0; i < 4; ++i) {
+        if (ids[i] == id) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ActorIsAttachPart(const std::uint8_t* actor, const std::uint8_t* ctx) {
+    if (!actor) {
+        return false;
+    }
+    std::uint32_t model_raw = 0;
+    std::memcpy(&model_raw, actor + 0x9C, 4);
+    if (model_raw >= 0x10000u) {
+        auto* model = reinterpret_cast<std::uint8_t*>(static_cast<std::uintptr_t>(model_raw));
+        if (PtrReadable(model, 0x38u)) {
+            std::uint16_t flags = 0;
+            std::memcpy(&flags, model + 0x36, 2);
+            if ((flags & kAttachModelFlag) == kAttachModelFlag) {
+                return true;
+            }
+        }
+    }
+    if (!ctx) {
+        return false;
+    }
+    std::uint8_t catalog = actor[0x189];
+    if (catalog == 0) {
+        catalog = actor[0x25];
+    }
+    return catalog < 16u && IsAttachFormRow(ctx[0x64a07u + catalog]);
+}
+
+std::uint8_t* CombatantActorAt(std::uint8_t* table, unsigned id) {
+    if (!table || table[id * 8u] == 0) {
+        return nullptr;
+    }
+    std::uint32_t raw = 0;
+    std::memcpy(&raw, table + id * 8u + 4u, 4);
+    if (raw < 0x10000u) {
+        return nullptr;
+    }
+    auto* actor = reinterpret_cast<std::uint8_t*>(static_cast<std::uintptr_t>(raw));
+    return PtrReadable(actor, 0x190u) ? actor : nullptr;
+}
+
+bool SliceOccupied(std::uintptr_t table_rva, unsigned count) {
+    const auto base = ModuleBase();
+    if (base == 0) {
+        return false;
+    }
+    auto* table = reinterpret_cast<std::uint8_t*>(base + table_rva);
+    if (!PtrReadable(table, count * 8u)) {
+        return false;
+    }
+    __try {
+        for (unsigned id = 0; id < count; ++id) {
+            if (CombatantActorAt(table, id)) {
+                return true;
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    return false;
+}
+
+bool PdatStillReferenced() {
+    return SliceOccupied(kAllyCombatantTableRva, kBattleCombatantSliceCount) ||
+           SliceOccupied(kCombatantTableRva, kBattleCombatantSliceCount);
+}
+
+int CountLivingInSlice(std::uintptr_t table_rva, unsigned count, bool opponents,
+                       const std::uint8_t* party, const std::uint8_t* ctx) {
     const auto base = ModuleBase();
     if (base == 0) {
         return 0;
     }
-    void* ctxp = nullptr;
-    if (!SafeReadPointer(base + kBattleCtxPtrRva, &ctxp) || !ctxp ||
-        !PtrReadable(ctxp, 0x64a07u + 16u)) {
-        return 0;
-    }
-    auto* ctx = static_cast<std::uint8_t*>(ctxp);
-    auto* table = reinterpret_cast<std::uint8_t*>(base + kCombatantTableRva);
-    if (!PtrReadable(table, kCombatantTableCount * 8u)) {
+    auto* table = reinterpret_cast<std::uint8_t*>(base + table_rva);
+    if (!PtrReadable(table, count * 8u)) {
         return 0;
     }
     int living = 0;
     __try {
-        for (unsigned id = 0; id < kCombatantTableCount; ++id) {
-            if (table[id * 8u] == 0) {
+        for (unsigned id = 0; id < count; ++id) {
+            auto* actor = CombatantActorAt(table, id);
+            if (!actor) {
                 continue;
             }
-            std::uint32_t raw = 0;
-            std::memcpy(&raw, table + id * 8u + 4u, 4);
-            if (raw < 0x10000u) {
-                continue;
-            }
-            auto* actor = reinterpret_cast<std::uint8_t*>(static_cast<std::uintptr_t>(raw));
-            if (!PtrReadable(actor, 0x190u) || actor[2] != 7) {
+            const bool ally = actor[2] != 7 && PartyIdInRoster(actor[0x10F], party);
+            if (opponents == ally) {
                 continue;
             }
             std::int16_t hp = 0;
@@ -2472,32 +2579,36 @@ int CountLivingFieldEnemies() {
             if (hp <= 0) {
                 continue;
             }
-            bool attach = false;
-            std::uint32_t model_raw = 0;
-            std::memcpy(&model_raw, actor + 0x9C, 4);
-            if (model_raw >= 0x10000u) {
-                auto* model = reinterpret_cast<std::uint8_t*>(static_cast<std::uintptr_t>(model_raw));
-                if (PtrReadable(model, 0x38u)) {
-                    std::uint16_t flags = 0;
-                    std::memcpy(&flags, model + 0x36, 2);
-                    attach = (flags & kAttachModelFlag) == kAttachModelFlag;
-                }
+            if (opponents && ActorIsAttachPart(actor, ctx)) {
+                continue;
             }
-            std::uint8_t catalog = actor[0x189];
-            if (catalog == 0) {
-                catalog = actor[0x25];
-            }
-            if (!attach && catalog < 16u) {
-                attach = IsAttachFormRow(ctx[0x64a07u + catalog]);
-            }
-            if (!attach) {
-                ++living;
-            }
+            ++living;
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return 0;
     }
     return living;
+}
+
+int CountLivingFieldEnemies() {
+    const auto base = ModuleBase();
+    void* ctxp = nullptr;
+    if (base == 0 || !SafeReadPointer(base + kBattleCtxPtrRva, &ctxp) || !ctxp ||
+        !PtrReadable(ctxp, 0x64a07u + 16u)) {
+        return 0;
+    }
+    std::uint8_t party[4]{};
+    CurrentPartyIds(party);
+    auto* ctx = static_cast<std::uint8_t*>(ctxp);
+    return CountLivingInSlice(kCombatantTableRva, kBattleCombatantSliceCount, true, party, ctx) +
+           CountLivingInSlice(kAllyCombatantTableRva, kBattleCombatantSliceCount, true, party, ctx);
+}
+
+int CountLivingAllies() {
+    std::uint8_t party[4]{};
+    CurrentPartyIds(party);
+    return CountLivingInSlice(kAllyCombatantTableRva, kBattleCombatantSliceCount, false, party,
+                              nullptr);
 }
 
 void RaiseVictory() {
@@ -2551,6 +2662,9 @@ void RaiseVictory() {
 void OnBattleLoad() {
     ClearAttachParent();
     g_victory_raised = false;
+    if (g_restore_pending) {
+        CommitFieldPartyRestore();
+    }
     grandia_mod::RaiseMagicCatalog();
     std::uint8_t live[4]{};
     if (!ReadFieldParty(live)) {
@@ -2660,6 +2774,9 @@ extern "C" void ModAfterEnemyPayout() {
         return;
     }
     if (grandia_mod::CountLivingFieldEnemies() > 0) {
+        return;
+    }
+    if (grandia_mod::CountLivingAllies() == 0) {
         return;
     }
     grandia_mod::RaiseVictory();
