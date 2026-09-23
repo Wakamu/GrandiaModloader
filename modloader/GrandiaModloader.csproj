@@ -12,6 +12,8 @@
     <ApplicationHighDpiMode>SystemAware</ApplicationHighDpiMode>
     <ApplicationIcon>app.ico</ApplicationIcon>
     <_FieldToolsSrc>$(MSBuildThisFileDirectory)..\vendor\field_tools</_FieldToolsSrc>
+    <!-- Setup\obj must not be compiled; zip staging used to land there. -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);Setup\**\*</DefaultItemExcludes>
   </PropertyGroup>
 
   <Target Name="CopyFieldTools" AfterTargets="Build"

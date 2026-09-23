@@ -17,9 +17,12 @@ internal sealed record UpdateCheckResult(
     string Current,
     string? Remote = null,
     string? Url = null,
+    string? ZipUrl = null,
     string? Error = null)
 {
     public bool IsNewer => Status == UpdateCheckStatus.Available && !string.IsNullOrEmpty(Remote);
+
+    public bool CanApply => !string.IsNullOrWhiteSpace(ZipUrl);
 }
 
 internal static class UpdateChecker
@@ -54,13 +57,14 @@ internal static class UpdateChecker
                 url = AppVersion.ReleasesUrl;
             }
 
+            var zipUrl = FindZipAsset(root);
             var remote = Normalize(tag);
             if (IsNewer(remote, current))
             {
-                return new UpdateCheckResult(UpdateCheckStatus.Available, current, remote, url);
+                return new UpdateCheckResult(UpdateCheckStatus.Available, current, remote, url, zipUrl);
             }
 
-            return new UpdateCheckResult(UpdateCheckStatus.UpToDate, current, remote, url);
+            return new UpdateCheckResult(UpdateCheckStatus.UpToDate, current, remote, url, zipUrl);
         }
         catch (OperationCanceledException)
         {
@@ -93,6 +97,42 @@ internal static class UpdateChecker
         }
 
         return !string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string? FindZipAsset(JsonElement root)
+    {
+        if (!root.TryGetProperty("assets", out var assets) || assets.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        string? fallback = null;
+        foreach (var asset in assets.EnumerateArray())
+        {
+            var name = asset.TryGetProperty("name", out var nameEl) ? nameEl.GetString() : null;
+            var href = asset.TryGetProperty("browser_download_url", out var hrefEl)
+                ? hrefEl.GetString()
+                : null;
+            if (string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(href))
+            {
+                continue;
+            }
+
+            if (name.Equals(AppVersion.UpdateZipAsset, StringComparison.OrdinalIgnoreCase))
+            {
+                return href;
+            }
+
+            if (fallback is null &&
+                name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase) &&
+                name.Contains("GrandiaModloader", StringComparison.OrdinalIgnoreCase) &&
+                !name.Contains("Setup", StringComparison.OrdinalIgnoreCase))
+            {
+                fallback = href;
+            }
+        }
+
+        return fallback;
     }
 
     private static bool TryParse(string text, out Version version)

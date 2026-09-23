@@ -66,7 +66,16 @@ public sealed class MainForm : Form
         _down.Click += (_, _) => MoveSelected(1);
         _settings.Click += (_, _) => OpenSettings();
         _updates.Click += async (_, _) => await CheckUpdatesAsync(prompt: true);
-        _updateLink.LinkClicked += (_, _) => OpenRelease(_update);
+        _updateLink.LinkClicked += async (_, _) =>
+        {
+            if (_update?.CanApply == true)
+            {
+                await ApplyUpdateAsync(_update);
+                return;
+            }
+
+            OpenRelease(_update);
+        };
         Shown += async (_, _) =>
         {
             if (_store.Config.CheckForUpdates)
@@ -320,7 +329,9 @@ public sealed class MainForm : Form
             switch (result.Status)
             {
                 case UpdateCheckStatus.Available:
-                    _updateLink.Text = $"Update {result.Remote} available — open GitHub";
+                    _updateLink.Text = result.CanApply
+                        ? $"Update {result.Remote} available — install"
+                        : $"Update {result.Remote} available — open GitHub";
                     _updateLink.Visible = true;
                     AppendLog($"Update {result.Remote} available (this build is {AppVersion.Display}).");
                     if (prompt || ShouldPrompt(result))
@@ -380,13 +391,37 @@ public sealed class MainForm : Form
 
     private void PromptUpdate(UpdateCheckResult result, bool fromButton)
     {
-        var text = $"Grandia Modloader {result.Remote} is on GitHub.{Environment.NewLine}" +
-                   $"This build is {AppVersion.Display}.{Environment.NewLine}{Environment.NewLine}" +
-                   "Yes = open the release page. Cancel = skip this version.";
+        var apply = result.CanApply;
+        var text = apply
+            ? $"Grandia Modloader {result.Remote} is available.{Environment.NewLine}" +
+              $"This build is {AppVersion.Display}.{Environment.NewLine}{Environment.NewLine}" +
+              "Yes = download and install (the app will restart). No = open GitHub."
+            : $"Grandia Modloader {result.Remote} is on GitHub.{Environment.NewLine}" +
+              $"This build is {AppVersion.Display}.{Environment.NewLine}{Environment.NewLine}" +
+              "Yes = open the release page.";
+        if (!fromButton)
+        {
+            text += " Cancel = skip this version.";
+        }
+
         var choice = MessageBox.Show(this, text, "Update available",
             fromButton ? MessageBoxButtons.YesNo : MessageBoxButtons.YesNoCancel,
             MessageBoxIcon.Information);
         if (choice == DialogResult.Yes)
+        {
+            if (apply)
+            {
+                _ = ApplyUpdateAsync(result);
+            }
+            else
+            {
+                OpenRelease(result);
+            }
+
+            return;
+        }
+
+        if (choice == DialogResult.No && apply)
         {
             OpenRelease(result);
             return;
@@ -396,6 +431,73 @@ public sealed class MainForm : Form
         {
             _store.Config.SkipRelease = result.Remote ?? "";
             _store.SaveConfig();
+        }
+    }
+
+    private async Task ApplyUpdateAsync(UpdateCheckResult result)
+    {
+        if (!result.CanApply || string.IsNullOrWhiteSpace(result.ZipUrl))
+        {
+            OpenRelease(result);
+            return;
+        }
+
+        if (_launch.IsBusy)
+        {
+            MessageBox.Show(this, "Cancel Launch first, then install the update.",
+                "Update", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        _updates.Enabled = false;
+        _launchBtn.Enabled = false;
+        try
+        {
+            var zip = Path.Combine(Updater.UpdateRoot, AppVersion.UpdateZipAsset);
+            var extract = Path.Combine(Updater.UpdateRoot, "extract");
+            AppendLog($"Downloading {result.Remote}…");
+            var progress = new Progress<int>(pct =>
+            {
+                if (!IsDisposed)
+                {
+                    _updateLink.Text = $"Downloading {result.Remote}… {pct}%";
+                    _updateLink.Visible = true;
+                }
+            });
+            await Updater.DownloadAsync(result.ZipUrl, zip, progress);
+            AppendLog("Extracting update…");
+            Updater.ExtractZip(zip, extract);
+            if (!Updater.LooksLikePayload(extract))
+            {
+                throw new InvalidOperationException(
+                    "The update zip is missing GrandiaModloader.exe or GrandiaMod.dll.");
+            }
+
+            var installDir = Path.GetFullPath(Paths.AppDir.TrimEnd(Path.DirectorySeparatorChar,
+                Path.AltDirectorySeparatorChar));
+            AppendLog($"Installing into {installDir}…");
+            if (!Updater.StartApply(extract, installDir))
+            {
+                AppendLog("Update cancelled (UAC).");
+                return;
+            }
+
+            AppendLog("Restarting…");
+            Close();
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"Update failed: {ex.Message}");
+            MessageBox.Show(this, ex.Message, "Update failed", MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+        }
+        finally
+        {
+            if (!IsDisposed)
+            {
+                _updates.Enabled = true;
+                _launchBtn.Enabled = !_launch.IsBusy;
+            }
         }
     }
 

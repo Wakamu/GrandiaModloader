@@ -51,4 +51,26 @@
           SkipUnchangedFiles="true"
           Condition="Exists('$(MSBuildThisFileDirectory)..\app.ico')" />
   </Target>
+
+  <!-- Same payload as the MSI, as dist\GrandiaModloader-win-x86.zip for the in-app updater.
+       Attach that file to the GitHub release (keep the name). -->
+  <Target Name="PackUpdateZip" AfterTargets="Build">
+    <PropertyGroup>
+      <_UpdateZipStage>$(RepoRoot)build\update-zip</_UpdateZipStage>
+      <_UpdateZipPath>$(RepoRoot)dist\GrandiaModloader-win-x86.zip</_UpdateZipPath>
+    </PropertyGroup>
+    <RemoveDir Directories="$(_UpdateZipStage)" Condition="Exists('$(_UpdateZipStage)')" />
+    <MakeDir Directories="$(_UpdateZipStage);$(RepoRoot)dist" />
+    <ItemGroup>
+      <_ZipFile Include="$(AppOutDir)**\*"
+                Exclude="$(AppOutDir)**\*.pdb;$(AppOutDir)mods\**\*;$(AppOutDir)templates\**\obj\**;$(AppOutDir)templates\**\bin\**;$(AppOutDir)config.json" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_ZipFile)"
+          DestinationFiles="@(_ZipFile->'$(_UpdateZipStage)\%(RecursiveDir)%(Filename)%(Extension)')"
+          Condition="'@(_ZipFile)' != ''" />
+    <Delete Files="$(_UpdateZipPath)" Condition="Exists('$(_UpdateZipPath)')" />
+    <ZipDirectory SourceDirectory="$(_UpdateZipStage)" DestinationFile="$(_UpdateZipPath)"
+                  Overwrite="true" />
+    <Message Text="Update zip: $(_UpdateZipPath)" Importance="high" />
+  </Target>
 </Project>

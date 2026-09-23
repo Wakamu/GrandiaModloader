@@ -40,6 +40,8 @@ dotnet build sdk\Grandia.Sdk.csproj -c Release
 dotnet build modloader\Setup\Setup.wixproj -c Release
 ```
 
+That last command writes both the MSI and `dist\GrandiaModloader-win-x86.zip`. First-time install is still the MSI. In-app updates download the zip from the GitHub release (same file name), replace Program Files, and restart — `%AppData%\GrandiaModloader` mods and `config.json` stay put. Attach the zip to the release when you publish; bump `AppVersion.Current` so clients see it.
+
 Each Setup build stamps a new MSI version (`1.{yy}.{day}{hour}` UTC). Re-running an older `1.0.0` MSI only Repairs and leaves Program Files unchanged. After install, launch the modloader once so `%AppData%\GrandiaModloader\runtime` picks up the new DLLs.
 
 ## Write a mod

@@ -8,7 +8,7 @@ namespace GrandiaModloader;
 /// </summary>
 internal static class AppVersion
 {
-    public const string Current = "1.1.2";
+    public const string Current = "1.2.0";
 
     public const string GitHubOwner = "Wakamu";
     public const string GitHubRepo = "GrandiaModloader";
@@ -20,4 +20,10 @@ internal static class AppVersion
 
     public static string LatestReleaseApiUrl =>
         $"https://api.github.com/repos/{GitHubOwner}/{GitHubRepo}/releases/latest";
+
+    /// <summary>
+    /// GitHub release asset the in-app updater downloads. Setup.wixproj
+    /// writes the same name to <c>dist\</c>.
+    /// </summary>
+    public const string UpdateZipAsset = "GrandiaModloader-win-x86.zip";
 }

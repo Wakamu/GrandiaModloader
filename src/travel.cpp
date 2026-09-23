@@ -1094,18 +1094,30 @@ extern "C" void ModAfterAmapRowCount() {
     AfterAmapRowCount();
 }
 
+bool HaveAddedIcons() {
+    for (int i = 0; i < kSlots; ++i) {
+        if (g_added_icon[i]) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void OnWorldMapCursorInit(int suggested) {
     const auto base = ModuleBase();
     if (base == 0) {
         return;
     }
-    std::uint8_t amap = 0;
-    SafeReadByte(base + kWorldMapAmapIndexRva, &amap);
-    int set_id = ReadSetId(base, static_cast<int>(amap));
-    if (set_id < 0 || set_id >= kSets) {
-        set_id = 0;
+    int icon = suggested;
+    if (g_wide_patched && HaveAddedIcons()) {
+        std::uint8_t amap = 0;
+        SafeReadByte(base + kWorldMapAmapIndexRva, &amap);
+        int set_id = ReadSetId(base, static_cast<int>(amap));
+        if (set_id < 0 || set_id >= kSets) {
+            set_id = 0;
+        }
+        icon = PickAccessibleStart(set_id, suggested);
     }
-    int icon = PickAccessibleStart(set_id, suggested);
     if (icon < 0) {
         icon = 0;
     }
@@ -1398,9 +1410,6 @@ bool InstallWorldMapHook() {
     }
 
     CaptureTables(base);
-    if (!InstallWideTables(base)) {
-        LogWarn("OnWorldMapLoad 32-slot tables not installed");
-    }
     g_wm_load_tramp_mem = MakeTrampoline(load, kLoadPatchSize, load + kLoadPatchSize);
     if (!g_wm_load_tramp_mem) {
         LogWarn("OnWorldMapLoad trampoline alloc failed");
